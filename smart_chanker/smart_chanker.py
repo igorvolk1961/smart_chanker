@@ -18,11 +18,11 @@ except ImportError:
     logging.warning("Пакет unstructured не установлен")
 
 try:
-    import docx2txt
-    DOCX2TXT_AVAILABLE = True
+    from docx2python import docx2python
+    DOCX2PYTHON_AVAILABLE = True
 except ImportError:
-    DOCX2TXT_AVAILABLE = False
-    logging.warning("Пакет docx2txt не установлен")
+    DOCX2PYTHON_AVAILABLE = False
+    logging.warning("Пакет docx2python не установлен")
 
 
 class SmartChanker:
@@ -101,16 +101,15 @@ class SmartChanker:
     
     def _check_tools_availability(self):
         """
-        Проверка доступности инструментов обработки
+        Проверка доступности инструментов для комбинированного подхода
         """
-        tools_status = {
-            "unstructured": UNSTRUCTURED_AVAILABLE,
-            "docx2txt": DOCX2TXT_AVAILABLE
-        }
+        if not UNSTRUCTURED_AVAILABLE:
+            self.logger.warning("Пакет unstructured недоступен")
+        if not DOCX2PYTHON_AVAILABLE:
+            self.logger.warning("Пакет docx2python недоступен")
         
-        for tool, available in tools_status.items():
-            if not available:
-                self.logger.warning(f"Инструмент {tool} недоступен")
+        if not UNSTRUCTURED_AVAILABLE or not DOCX2PYTHON_AVAILABLE:
+            self.logger.error("Для работы требуется оба пакета: unstructured и docx2python")
     
     def process_folder(self, folder_path: str) -> Dict[str, Any]:
         """
@@ -165,7 +164,7 @@ class SmartChanker:
     
     def _get_files_to_process(self, folder_path: str) -> List[str]:
         """
-        Получение списка файлов для обработки
+        Получение списка файлов для обработки (только DOCX/DOC)
         
         Args:
             folder_path: Путь к папке
@@ -173,7 +172,7 @@ class SmartChanker:
         Returns:
             Список путей к файлам
         """
-        supported_extensions = ['.txt', '.docx', '.doc', '.pdf', '.md']
+        supported_extensions = ['.docx', '.doc']
         files = []
         
         for root, dirs, filenames in os.walk(folder_path):
@@ -188,7 +187,7 @@ class SmartChanker:
     
     def _process_single_file(self, file_path: str) -> Dict[str, Any]:
         """
-        Обработка одного файла
+        Обработка одного файла с использованием комбинированного подхода
         
         Args:
             file_path: Путь к файлу
@@ -198,66 +197,404 @@ class SmartChanker:
         """
         file_ext = Path(file_path).suffix.lower()
         
-        # Определяем инструмент для обработки
-        if file_ext == '.docx' and self.config["tools"]["docx2txt"]["enabled"]:
-            return self._process_with_docx2txt(file_path)
-        elif self.config["tools"]["unstructured"]["enabled"]:
-            return self._process_with_unstructured(file_path)
+        # Проверяем поддержку формата
+        if file_ext not in ['.docx', '.doc']:
+            raise ValueError(f"Неподдерживаемый формат файла: {file_ext}. Поддерживаются только .docx и .doc")
+        
+        # Используем комбинированный подход
+        return self._process_with_combined_approach(file_path)
+    
+    def _process_with_combined_approach(self, file_path: str) -> Dict[str, Any]:
+        """
+        Комбинированная обработка файла с использованием обоих инструментов
+        
+        Args:
+            file_path: Путь к файлу
+            
+        Returns:
+            Результат обработки
+        """
+        if not UNSTRUCTURED_AVAILABLE or not DOCX2PYTHON_AVAILABLE:
+            raise ImportError("Для комбинированного подхода требуются оба пакета: unstructured и docx2python")
+        
+        self.logger.info(f"Используем комбинированный подход для файла: {file_path}")
+        
+        # Обрабатываем с помощью unstructured - получаем элементы
+        unstructured_elements = partition(file_path)
+        
+        # Обрабатываем с помощью docx2python - получаем текст с восстановлением нумерации
+        docx2python_text = self._extract_text_with_docx2python(file_path)
+        
+        # Заменяем таблицы на HTML представление
+        combined_text = self._replace_tables_with_html(docx2python_text, unstructured_elements)
+        
+        # Создаем абзацы из объединенного текста
+        combined_paragraphs = [p.strip() for p in combined_text.split('\n\n') if p.strip()]
+        
+        return {
+            "file_path": file_path,
+            "tool_used": "combined_approach",
+            "original_docx2python_text": docx2python_text,
+            "combined_text": combined_text,
+            "paragraphs": combined_paragraphs,
+            "paragraphs_count": len(combined_paragraphs),
+            "table_replacements_count": len(self._find_table_paragraphs_docx2python(docx2python_text))
+        }
+    
+    def _extract_text_with_docx2python(self, file_path: str) -> str:
+        """
+        Извлекает текст из DOCX файла с помощью docx2python с восстановлением нумерации
+        
+        Args:
+            file_path: путь к DOCX файлу
+            
+        Returns:
+            str: извлеченный текст с восстановленной нумерацией
+        """
+        if not DOCX2PYTHON_AVAILABLE:
+            raise ImportError("Пакет docx2python недоступен")
+        
+        try:
+            doc = docx2python(file_path)
+            
+            # Извлекаем все параграфы из вложенной структуры
+            all_paragraphs = self._extract_all_paragraphs(doc.document_pars)
+            
+            # Восстанавливаем нумерацию
+            restored_text = self._restore_numbering_in_paragraphs(all_paragraphs)
+            
+            doc.close()
+            return restored_text
+            
+        except Exception as e:
+            self.logger.error(f"Ошибка при извлечении текста с docx2python: {e}")
+            return ""
+    
+    def _extract_all_paragraphs(self, data, level=0):
+        """
+        Рекурсивно извлекает все объекты Par из вложенной структуры docx2python
+        
+        Args:
+            data: данные из docx2python (может быть списком или объектом Par)
+            level: уровень вложенности для отладки
+        
+        Returns:
+            list: список всех найденных объектов Par
+        """
+        paragraphs = []
+        
+        if isinstance(data, list):
+            for i, item in enumerate(data):
+                if hasattr(item, 'runs'):  # Это объект Par
+                    paragraphs.append(item)
+                else:
+                    # Рекурсивно обходим вложенные структуры
+                    nested_paragraphs = self._extract_all_paragraphs(item, level + 1)
+                    paragraphs.extend(nested_paragraphs)
+        elif hasattr(data, 'runs'):  # Это объект Par
+            paragraphs.append(data)
+        
+        return paragraphs
+    
+    def _restore_numbering_in_paragraphs(self, paragraphs):
+        """
+        Восстанавливает нумерацию в параграфах с полной иерархией
+        
+        Args:
+            paragraphs: список параграфов из docx2python
+        
+        Returns:
+            str: текст с восстановленной нумерацией
+        """
+        import re
+        
+        restored_paragraphs = []
+        hierarchy_tracker = {}  # Отслеживаем текущие номера для каждого уровня
+        
+        for i, paragraph in enumerate(paragraphs):
+            # Проверяем, что это объект Par
+            if not hasattr(paragraph, 'runs'):
+                continue
+                
+            # Извлекаем текст параграфа
+            paragraph_text = ""
+            list_position = None
+            
+            # Получаем текст и list_position из runs
+            for run in paragraph.runs:
+                paragraph_text += run.text
+            
+            # Получаем list_position
+            if hasattr(paragraph, 'list_position'):
+                list_position = paragraph.list_position
+            
+            # Восстанавливаем нумерацию
+            if list_position and len(list_position) >= 2 and list_position[1]:
+                # list_position[1] содержит массив уровней нумерации
+                numbering_levels = list_position[1]
+                
+                if numbering_levels:  # Если есть уровни нумерации
+                    # Создаем полную иерархическую нумерацию
+                    full_numbering = self._build_hierarchical_numbering(list_position, hierarchy_tracker)
+                    
+                    # Ищем паттерн нумерации в тексте (1), 2), 3) и т.д.)
+                    pattern = r'^(\s*)(\d+\)\s*)(.*)$'
+                    match = re.match(pattern, paragraph_text, re.MULTILINE)
+                    
+                    if match:
+                        indent = match.group(1)
+                        old_numbering = match.group(2)
+                        content = match.group(3)
+                        
+                        # Заменяем старую нумерацию на полную иерархическую
+                        new_text = f"{indent}{full_numbering} {content}"
+                        restored_paragraphs.append(new_text)
+                    else:
+                        # Если не нашли паттерн, оставляем как есть
+                        restored_paragraphs.append(paragraph_text)
+                else:
+                    restored_paragraphs.append(paragraph_text)
+            else:
+                # Если нет list_position, проверяем на маркеры списков
+                if paragraph_text.strip().startswith('--'):
+                    # Заменяем -- на • для маркеров списков
+                    new_text = paragraph_text.replace('--', '•', 1)
+                    restored_paragraphs.append(new_text)
+                else:
+                    # Оставляем как есть
+                    restored_paragraphs.append(paragraph_text)
+        
+        return "\n".join(restored_paragraphs)
+    
+    def _build_hierarchical_numbering(self, list_position, hierarchy_tracker):
+        """
+        Строит полную иерархическую нумерацию на основе list_position
+        
+        Args:
+            list_position: кортеж (style_id, numbering_levels) из docx2python
+            hierarchy_tracker: словарь для отслеживания текущих номеров по уровням
+        
+        Returns:
+            str: полная иерархическая нумерация (например, "1.1.2.")
+        """
+        style_id, numbering_levels = list_position
+        
+        # Если numbering_levels содержит несколько элементов, используем их как полную иерархию
+        if len(numbering_levels) > 1:
+            # Это случай типа [2, 1] для 1.2.1.
+            return ".".join(map(str, numbering_levels)) + "."
+        
+        # Определяем уровень иерархии по style_id
+        # Поддерживаем произвольную глубину иерархии
+        if style_id and style_id.isdigit():
+            style_id_num = int(style_id)
+            
+            # Для style_id >= 32 - это уровни иерархии (32=1, 33=2, 34=3, 35=4, и т.д.)
+            if style_id_num >= 32:
+                hierarchy_level = style_id_num - 31
+            else:
+                # Для style_id < 32 - это не уровни иерархии, а маркеры списков
+                if numbering_levels:
+                    return str(numbering_levels[0]) + "."
+                else:
+                    return "1."
         else:
-            raise ValueError(f"Нет доступного инструмента для обработки файла {file_path}")
+            # Если style_id не число, возвращаем простую нумерацию
+            if numbering_levels:
+                return str(numbering_levels[0]) + "."
+            else:
+                return "1."
+        
+        # Инициализируем трекер для всех уровней до текущего
+        for level in range(1, hierarchy_level + 1):
+            if level not in hierarchy_tracker:
+                hierarchy_tracker[level] = 0
+        
+        # Сбрасываем счетчики для более глубоких уровней
+        for level in range(hierarchy_level + 1, max(hierarchy_tracker.keys(), default=0) + 1):
+            hierarchy_tracker[level] = 0
+        
+        # Устанавливаем номер для текущего уровня из numbering_levels
+        if numbering_levels:
+            hierarchy_tracker[hierarchy_level] = numbering_levels[0]
+        
+        # Строим полную нумерацию
+        full_numbering_parts = []
+        for level in range(1, hierarchy_level + 1):
+            full_numbering_parts.append(str(hierarchy_tracker[level]))
+        
+        return ".".join(full_numbering_parts) + "."
     
-    def _process_with_unstructured(self, file_path: str) -> Dict[str, Any]:
+    def _find_table_paragraphs_docx2python(self, text: str) -> List[Dict]:
         """
-        Обработка файла с помощью unstructured
+        Поиск абзацев, начинающихся со слова "Таблица" в тексте docx2python
         
         Args:
-            file_path: Путь к файлу
+            text: Полный текст документа
             
         Returns:
-            Результат обработки
+            Список словарей с информацией об абзацах "Таблица"
         """
-        if not UNSTRUCTURED_AVAILABLE:
-            raise ImportError("Пакет unstructured недоступен")
+        import re
         
-        # Парсинг документа
-        elements = partition(file_path)
+        # Разбиваем текст на абзацы
+        paragraphs = text.split('\n\n')
+        table_paragraphs = []
         
-        # Разбивка на чанки
-        chunks = chunk_by_title(
-            elements,
-            max_characters=self.config["tools"]["unstructured"]["max_characters"]
-        )
+        for i, paragraph in enumerate(paragraphs):
+            paragraph = paragraph.strip()
+            if paragraph.startswith('Таблица'):
+                # Находим позицию в исходном тексте
+                position = text.find(paragraph)
+                table_paragraphs.append({
+                    'index': i,
+                    'text': paragraph,
+                    'position': position,
+                    'length': len(paragraph)
+                })
         
-        return {
-            "file_path": file_path,
-            "tool_used": "unstructured",
-            "chunks": [str(chunk) for chunk in chunks],
-            "chunks_count": len(chunks)
-        }
+        return table_paragraphs
     
-    def _process_with_docx2txt(self, file_path: str) -> Dict[str, Any]:
+    def _find_table_paragraphs_unstructured(self, elements: List) -> List[Dict]:
         """
-        Обработка файла с помощью docx2txt
+        Поиск абзацев, начинающихся со слова "Таблица" в элементах unstructured
         
         Args:
-            file_path: Путь к файлу
+            elements: Список элементов из unstructured
             
         Returns:
-            Результат обработки
+            Список словарей с информацией об абзацах "Таблица"
         """
-        if not DOCX2TXT_AVAILABLE:
-            raise ImportError("Пакет docx2txt недоступен")
+        table_paragraphs = []
         
-        # Извлечение текста
-        text = docx2txt.process(file_path)
+        for i, element in enumerate(elements):
+            if hasattr(element, 'text') and element.text:
+                text = element.text.strip()
+                if text.startswith('Таблица'):
+                    table_paragraphs.append({
+                        'index': i,
+                        'text': text,
+                        'element': element,
+                        'category': element.category
+                    })
         
-        # Простая разбивка на абзацы
-        paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
+        return table_paragraphs
+    
+    def _find_table_after_paragraph(self, elements: List, start_index: int, max_paragraphs: int = 3) -> Dict:
+        """
+        Поиск таблицы после абзаца "Таблица" в unstructured
+        
+        Args:
+            elements: Список элементов из unstructured
+            start_index: Индекс абзаца "Таблица"
+            max_paragraphs: Максимальное количество абзацев для поиска
+            
+        Returns:
+            Словарь с информацией о найденной таблице
+        """
+        table_found = None
+        text_after_table = ""
+        paragraph_start_after_table = None
+        
+        # Ищем таблицу в следующих элементах
+        for i in range(start_index + 1, min(start_index + max_paragraphs + 1, len(elements))):
+            element = elements[i]
+            
+            if element.category == 'Table':
+                table_found = element
+                # Ищем текст после таблицы
+                for j in range(i + 1, len(elements)):
+                    next_element = elements[j]
+                    if hasattr(next_element, 'text') and next_element.text.strip():
+                        text_after_table = next_element.text.strip()
+                        paragraph_start_after_table = j
+                        break
+                break
         
         return {
-            "file_path": file_path,
-            "tool_used": "docx2txt",
-            "text": text,
-            "paragraphs": paragraphs,
-            "paragraphs_count": len(paragraphs)
+            'table_found': table_found,
+            'text_after_table': text_after_table,
+            'paragraph_start_after_table': paragraph_start_after_table
         }
+    
+    def _replace_tables_with_html(self, docx2python_text: str, unstructured_elements: List) -> str:
+        """
+        Замена таблиц в тексте docx2python на HTML представление из unstructured
+        
+        Args:
+            docx2python_text: Текст из docx2python
+            unstructured_elements: Элементы из unstructured
+            
+        Returns:
+            Текст с замененными таблицами
+        """
+        # Находим абзацы "Таблица" в обоих источниках
+        docx_table_paragraphs = self._find_table_paragraphs_docx2python(docx2python_text)
+        unstructured_table_paragraphs = self._find_table_paragraphs_unstructured(unstructured_elements)
+        
+        if len(docx_table_paragraphs) != len(unstructured_table_paragraphs):
+            self.logger.warning(f"Количество абзацев 'Таблица' не совпадает: "
+                              f"docx2python={len(docx_table_paragraphs)}, "
+                              f"unstructured={len(unstructured_table_paragraphs)}")
+        
+        # Сопоставляем по порядку и выполняем замены
+        result_text = docx2python_text
+        replacements = []
+        
+        for i, (docx_para, unstructured_para) in enumerate(zip(docx_table_paragraphs, unstructured_table_paragraphs)):
+            # Находим таблицу после абзаца в unstructured
+            table_data = self._find_table_after_paragraph(
+                unstructured_elements, 
+                unstructured_para['index'],
+                self.config.get("tools", {}).get("combined_approach", {}).get("max_paragraphs_after_table", 3)
+            )
+            
+            if table_data['table_found']:
+                # Определяем границы замены
+                start_pos = docx_para['position']
+                
+                # Находим конец заменяемого участка
+                if i + 1 < len(docx_table_paragraphs):
+                    end_pos = docx_table_paragraphs[i + 1]['position']
+                else:
+                    # Если это последняя таблица, ищем конец по unstructured
+                    if table_data['paragraph_start_after_table'] is not None:
+                        # Приблизительно определяем позицию в docx2txt
+                        end_pos = start_pos + len(docx_para['text']) + 1000  # Заглушка
+                    else:
+                        end_pos = len(result_text)
+                
+                # Создаем HTML таблицу
+                html_table = self._convert_table_to_html(table_data['table_found'])
+                
+                replacements.append({
+                    'start': start_pos,
+                    'end': end_pos,
+                    'table_paragraph': docx_para['text'],
+                    'html_table': html_table
+                })
+        
+        # Выполняем замены в обратном порядке
+        for replacement in reversed(replacements):
+            replacement_content = replacement['table_paragraph'] + '\n\n' + replacement['html_table']
+            result_text = (result_text[:replacement['start']] + 
+                          replacement_content + 
+                          result_text[replacement['end']:])
+        
+        return result_text
+    
+    def _convert_table_to_html(self, table_element) -> str:
+        """
+        Конвертация элемента таблицы в HTML
+        
+        Args:
+            table_element: Элемент таблицы из unstructured
+            
+        Returns:
+            HTML представление таблицы
+        """
+        if hasattr(table_element, 'metadata') and hasattr(table_element.metadata, 'text_as_html'):
+            return table_element.metadata.text_as_html
+        else:
+            # Если HTML недоступен, создаем простую таблицу
+            return f"<table>\n<tr><td>{table_element.text}</td></tr>\n</table>"

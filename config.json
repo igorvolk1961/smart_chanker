@@ -1,12 +1,9 @@
 {
   "tools": {
-    "unstructured": {
+    "combined_approach": {
       "enabled": true,
-      "chunking_strategy": "title",
-      "max_characters": 1000
-    },
-    "docx2txt": {
-      "enabled": true
+      "max_paragraphs_after_table": 3,
+      "description": "Комбинированный подход: docx2python для восстановления нумерации разделов + unstructured для HTML таблиц"
     }
   },
   "output": {
