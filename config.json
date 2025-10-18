@@ -1,0 +1,16 @@
+{
+  "tools": {
+    "unstructured": {
+      "enabled": true,
+      "chunking_strategy": "title",
+      "max_characters": 1000
+    },
+    "docx2txt": {
+      "enabled": true
+    }
+  },
+  "output": {
+    "format": "json",
+    "save_path": "./output"
+  }
+}

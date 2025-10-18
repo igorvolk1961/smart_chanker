@@ -1,0 +1,7 @@
+# Основные инструменты обработки
+unstructured[local-inference]>=0.10.0
+docx2txt>=0.8
+
+# Дополнительные зависимости
+pathlib2>=2.3.7
+typing-extensions>=4.0.0
