@@ -425,32 +425,24 @@ class SmartChanker:
         
         return ".".join(full_numbering_parts) + "."
     
-    def _find_table_paragraphs_docx2python(self, text: str) -> List[Dict]:
+    def _find_table_paragraphs_docx2python(self, paragraphs: List[str]) -> List[Dict]:
         """
-        Поиск абзацев, начинающихся со слова "Таблица" в тексте docx2python
+        Поиск абзацев, начинающихся со слова "Таблица" в списке параграфов
         
         Args:
-            text: Полный текст документа
+            paragraphs: Список параграфов документа
             
         Returns:
             Список словарей с информацией об абзацах "Таблица"
         """
-        import re
-        
-        # Разбиваем текст на абзацы
-        paragraphs = text.split('\n\n')
         table_paragraphs = []
         
         for i, paragraph in enumerate(paragraphs):
             paragraph = paragraph.strip()
             if paragraph.startswith('Таблица'):
-                # Находим позицию в исходном тексте
-                position = text.find(paragraph)
                 table_paragraphs.append({
                     'index': i,
-                    'text': paragraph,
-                    'position': position,
-                    'length': len(paragraph)
+                    'text': paragraph
                 })
         
         return table_paragraphs
@@ -480,7 +472,7 @@ class SmartChanker:
         
         return table_paragraphs
     
-    def _find_table_after_paragraph(self, elements: List, start_index: int, max_paragraphs: int = 3) -> Dict:
+    def _find_table_after_paragraph(self, elements: List, start_index: int, max_paragraphs: int = 3, table_paragraphs: List = None) -> Dict:
         """
         Поиск таблицы после абзаца "Таблица" в unstructured
         
@@ -499,6 +491,18 @@ class SmartChanker:
         # Ищем таблицу в следующих элементах
         for i in range(start_index + 1, min(start_index + max_paragraphs + 1, len(elements))):
             element = elements[i]
+            
+            # Останавливаем поиск, если наткнулись на следующий параграф "Таблица"
+            if table_paragraphs:
+                is_table_paragraph = False
+                for table_para in table_paragraphs:
+                    if table_para['index'] == i:
+                        is_table_paragraph = True
+                        break
+                
+                if is_table_paragraph:
+                    # Если это параграф "Таблица", прерываем поиск
+                    break
             
             if element.category == 'Table':
                 table_found = element
@@ -528,8 +532,11 @@ class SmartChanker:
         Returns:
             Текст с замененными таблицами
         """
+        # Разбиваем текст на параграфы один раз
+        docx_paragraphs = docx2python_text.split('\n')
+        
         # Находим абзацы "Таблица" в обоих источниках
-        docx_table_paragraphs = self._find_table_paragraphs_docx2python(docx2python_text)
+        docx_table_paragraphs = self._find_table_paragraphs_docx2python(docx_paragraphs)
         unstructured_table_paragraphs = self._find_table_paragraphs_unstructured(unstructured_elements)
         
         if len(docx_table_paragraphs) != len(unstructured_table_paragraphs):
@@ -538,50 +545,42 @@ class SmartChanker:
                               f"unstructured={len(unstructured_table_paragraphs)}")
         
         # Сопоставляем по порядку и выполняем замены
-        result_text = docx2python_text
-        replacements = []
-        
         for i, (docx_para, unstructured_para) in enumerate(zip(docx_table_paragraphs, unstructured_table_paragraphs)):
             # Находим таблицу после абзаца в unstructured
             table_data = self._find_table_after_paragraph(
                 unstructured_elements, 
                 unstructured_para['index'],
-                self.config.get("tools", {}).get("combined_approach", {}).get("max_paragraphs_after_table", 3)
+                self.config.get("tools", {}).get("combined_approach", {}).get("max_paragraphs_after_table", 3),
+                unstructured_table_paragraphs
             )
             
             if table_data['table_found']:
-                # Определяем границы замены
-                start_pos = docx_para['position']
-                
-                # Находим конец заменяемого участка
-                if i + 1 < len(docx_table_paragraphs):
-                    end_pos = docx_table_paragraphs[i + 1]['position']
-                else:
-                    # Если это последняя таблица, ищем конец по unstructured
-                    if table_data['paragraph_start_after_table'] is not None:
-                        # Приблизительно определяем позицию в docx2txt
-                        end_pos = start_pos + len(docx_para['text']) + 1000  # Заглушка
-                    else:
-                        end_pos = len(result_text)
-                
                 # Создаем HTML таблицу
                 html_table = self._convert_table_to_html(table_data['table_found'])
                 
-                replacements.append({
-                    'start': start_pos,
-                    'end': end_pos,
-                    'table_paragraph': docx_para['text'],
-                    'html_table': html_table
-                })
+                # Определяем конец заменяемого участка
+                start_index = docx_para['index']
+                
+                # Если есть текст после таблицы, ищем соответствующий параграф в docx
+                if table_data['text_after_table']:
+                    end_index = start_index + 1  # По умолчанию заменяем только параграф "Таблица"
+                    for j in range(start_index + 1, len(docx_paragraphs)):
+                        if table_data['text_after_table'] in docx_paragraphs[j]:
+                            end_index = j
+                            break
+                else:
+                    # Если текста после таблицы нет - заменяем все до конца файла
+                    end_index = len(docx_paragraphs)
+                
+                # Заменяем все параграфы между start_index и end_index на HTML таблицу
+                docx_paragraphs[start_index + 1:end_index] = [html_table]
+                
+                # Обновляем индексы в оставшихся docx_table_paragraphs
+                removed_count = end_index - start_index - 2  # Количество удаленных параграфов
+                for j in range(i + 1, len(docx_table_paragraphs)):
+                    docx_table_paragraphs[j]['index'] -= removed_count - 1 # один параграф добавлен
         
-        # Выполняем замены в обратном порядке
-        for replacement in reversed(replacements):
-            replacement_content = replacement['table_paragraph'] + '\n\n' + replacement['html_table']
-            result_text = (result_text[:replacement['start']] + 
-                          replacement_content + 
-                          result_text[replacement['end']:])
-        
-        return result_text
+        return '\n'.join(docx_paragraphs)
     
     def _convert_table_to_html(self, table_element) -> str:
         """

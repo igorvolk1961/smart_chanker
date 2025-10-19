@@ -1,13 +1,7 @@
 {
   "tools": {
     "combined_approach": {
-      "enabled": true,
-      "max_paragraphs_after_table": 3,
-      "description": "Комбинированный подход: docx2python для восстановления нумерации разделов + unstructured для HTML таблиц"
+      "max_paragraphs_after_table": 3
     }
-  },
-  "output": {
-    "format": "json",
-    "save_path": "./output"
   }
 }
