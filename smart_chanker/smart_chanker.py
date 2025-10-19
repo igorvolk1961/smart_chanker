@@ -555,8 +555,8 @@ class SmartChanker:
             )
             
             if table_data['table_found']:
-                # Создаем HTML таблицу
-                html_table = self._convert_table_to_html(table_data['table_found'])
+                # Создаем JSON таблицу
+                json_table = self._convert_table_to_json(table_data['table_found'])
                 
                 # Определяем конец заменяемого участка
                 start_index = docx_para['index']
@@ -572,8 +572,8 @@ class SmartChanker:
                     # Если текста после таблицы нет - заменяем все до конца файла
                     end_index = len(docx_paragraphs)
                 
-                # Заменяем все параграфы между start_index и end_index на HTML таблицу
-                docx_paragraphs[start_index + 1:end_index] = [html_table]
+                # Заменяем все параграфы между start_index и end_index на JSON таблицу
+                docx_paragraphs[start_index + 1:end_index] = [json_table]
                 
                 # Обновляем индексы в оставшихся docx_table_paragraphs
                 removed_count = end_index - start_index - 2  # Количество удаленных параграфов
@@ -582,18 +582,112 @@ class SmartChanker:
         
         return '\n'.join(docx_paragraphs)
     
-    def _convert_table_to_html(self, table_element) -> str:
+    def _convert_table_to_json(self, table_element) -> str:
         """
-        Конвертация элемента таблицы в HTML
+        Конвертация элемента таблицы в JSON формат для лучшего понимания LLM
         
         Args:
             table_element: Элемент таблицы из unstructured
             
         Returns:
-            HTML представление таблицы
+            JSON представление таблицы
         """
+        import json
+        
         if hasattr(table_element, 'metadata') and hasattr(table_element.metadata, 'text_as_html'):
-            return table_element.metadata.text_as_html
+            # Парсим HTML и конвертируем в JSON
+            return self._html_to_json(table_element.metadata.text_as_html)
         else:
-            # Если HTML недоступен, создаем простую таблицу
-            return f"<table>\n<tr><td>{table_element.text}</td></tr>\n</table>"
+            # Создаем простую JSON структуру
+            table_data = {
+                "type": "table",
+                "content": table_element.text,
+                "structure": {
+                    "headers": [],
+                    "rows": [{"cells": [{"text": table_element.text}]}]
+                }
+            }
+            json_str = json.dumps(table_data, ensure_ascii=False, indent=2)
+            return f"```json\n{json_str}\n```"
+    
+    def _html_to_json(self, html_content: str) -> str:
+        """
+        Конвертация HTML таблицы в JSON структуру
+        
+        Args:
+            html_content: HTML содержимое таблицы
+            
+        Returns:
+            JSON строка с описанием таблицы
+        """
+        import json
+        from bs4 import BeautifulSoup
+        
+        try:
+            soup = BeautifulSoup(html_content, 'html.parser')
+            table = soup.find('table')
+            
+            if not table:
+                return json.dumps({"type": "table", "error": "Не удалось найти таблицу"}, ensure_ascii=False)
+            
+            # Извлекаем заголовки
+            headers = []
+            thead = table.find('thead')
+            if thead:
+                for th in thead.find_all(['th', 'td']):
+                    colspan = int(th.get('colspan', 1))
+                    header = {"text": th.get_text(strip=True)}
+                    if colspan > 1:
+                        header["colspan"] = colspan
+                    headers.append(header)
+            else:
+                # Если нет thead, берем первую строку
+                first_row = table.find('tr')
+                if first_row:
+                    for cell in first_row.find_all(['th', 'td']):
+                        colspan = int(cell.get('colspan', 1))
+                        header = {"text": cell.get_text(strip=True)}
+                        if colspan > 1:
+                            header["colspan"] = colspan
+                        headers.append(header)
+            
+            # Извлекаем строки данных
+            rows = []
+            tbody = table.find('tbody') or table
+            for tr in tbody.find_all('tr'):
+                if tr == first_row and not thead:
+                    continue  # Пропускаем первую строку, если она уже в заголовках
+                
+                cells = []
+                for cell in tr.find_all(['td', 'th']):
+                    colspan = int(cell.get('colspan', 1))
+                    rowspan = int(cell.get('rowspan', 1))
+                    cell_data = {"text": cell.get_text(strip=True)}
+                    if colspan > 1:
+                        cell_data["colspan"] = colspan
+                    if rowspan > 1:
+                        cell_data["rowspan"] = rowspan
+                    cells.append(cell_data)
+                
+                if cells:  # Добавляем только непустые строки
+                    rows.append({"cells": cells})
+            
+            table_data = {
+                "type": "table",
+                "structure": {
+                    "headers": headers,
+                    "rows": rows
+                }
+            }
+            
+            json_str = json.dumps(table_data, ensure_ascii=False, indent=2)
+            return f"```json\n{json_str}\n```"
+            
+        except Exception as e:
+            # В случае ошибки возвращаем простую структуру
+            json_str = json.dumps({
+                "type": "table",
+                "error": f"Ошибка парсинга: {str(e)}",
+                "content": html_content
+            }, ensure_ascii=False, indent=2)
+            return f"```json\n{json_str}\n```"

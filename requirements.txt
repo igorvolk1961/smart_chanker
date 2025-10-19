@@ -5,3 +5,4 @@ docx2python>=1.0.0
 # Дополнительные зависимости
 pathlib2>=2.3.7
 typing-extensions>=4.0.0
+beautifulsoup4>=4.12.0
