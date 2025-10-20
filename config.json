@@ -4,6 +4,10 @@
       "max_paragraphs_after_table": 3
     }
   },
+  "output": {
+    "save_docx2python_text": true,
+    "docx2python_text_suffix": "_docx2python.txt"
+  },
   "hierarchical_chunking": {
     "enabled": true,
     "target_level": 3,

@@ -65,7 +65,9 @@ class SmartChanker:
             },
             "output": {
                 "format": "json",
-                "save_path": "./output"
+                "save_path": "./output",
+                "save_docx2python_text": False,
+                "docx2python_text_suffix": "_docx2python.txt"
             },
             "hierarchical_chunking": {
                 "enabled": False,
@@ -317,7 +319,10 @@ class SmartChanker:
         import re
         
         restored_paragraphs = []
-        hierarchy_tracker = {}  # Отслеживаем текущие номера для каждого уровня
+        hierarchy_tracker = {}  # Отслеживаем текущие номера для каждого уровня (для старой логики)
+        current_section_path: List[int] = []  # Явная текущая секция из заголовков 1., 1.2., 1.2.3.
+        child_counters: Dict[tuple, int] = {}  # Счетчик дочерних заголовков для каждого пути
+        last_root: Optional[int] = None       # Последний зафиксированный корневой номер (верхний уровень)
         
         for i, paragraph in enumerate(paragraphs):
             # Проверяем, что это объект Par
@@ -327,6 +332,7 @@ class SmartChanker:
             # Извлекаем текст параграфа
             paragraph_text = ""
             list_position = None
+            action_log = "keep"  # чем закончилась обработка параграфа
             
             # Получаем текст и list_position из runs
             for run in paragraph.runs:
@@ -335,42 +341,160 @@ class SmartChanker:
             # Получаем list_position
             if hasattr(paragraph, 'list_position'):
                 list_position = paragraph.list_position
+
+            # Логируем базовую информацию по абзацу для диагностики восстановления нумерации
+            try:
+                style_name = getattr(paragraph, 'style', None)
+            except Exception:
+                style_name = None
+            try:
+                numbering_levels_dbg = list_position[1] if (list_position and len(list_position) >= 2) else None
+            except Exception:
+                numbering_levels_dbg = None
+            self.logger.info(
+                f"[docx2python:num] idx={i} style={style_name} list_position={list_position} levels={numbering_levels_dbg} text='{paragraph_text[:120].replace('\n',' ')}'"
+            )
             
+            # Обнаружение явного заголовка раздела вида "1.", "1.2.", "1.2.3."
+            explicit_header = re.match(r'^\s*(\d+(?:\.\d+)*)\.(\s*)(.*)$', paragraph_text)
+            if explicit_header:
+                heading_style = getattr(paragraph, 'style', '')
+                header_num_str = explicit_header.group(1)
+                after_space = explicit_header.group(2)
+                after_text = explicit_header.group(3)
+                try:
+                    header_path = [int(x) for x in header_num_str.split('.')]
+                except Exception:
+                    header_path = []
+
+                # Если это повтор заголовка на том же пути — нумеруем как дочерний (без зависимости от стиля)
+                if header_path and current_section_path and header_path == current_section_path:
+                    self.logger.info(f"[num-debug] explicit repeat: parent_before={current_section_path}, header='{header_num_str}.' title='{after_text[:60]}'")
+                    key = tuple(current_section_path)
+                    next_idx = child_counters.get(key, 0) + 1
+                    child_counters[key] = next_idx
+                    new_path = current_section_path + [next_idx]
+                    new_num = '.'.join(str(x) for x in new_path) + '.'
+                    self.logger.info(f"[num-debug] -> child='{new_num}', parent_after={current_section_path}, idx={next_idx}")
+                    restored_paragraphs.append(f"{new_num}{after_space}{after_text}")
+                    action_log = f"replace: explicit->child {new_num}"
+                    continue
+
+                # Иначе считаем это установкой текущего пути секции
+                if header_path:
+                    self.logger.info(f"[num-debug] set parent from explicit: before={current_section_path} header='{header_num_str}.'")
+                    current_section_path = header_path
+                    # Зафиксируем текущий корневой номер
+                    try:
+                        last_root = header_path[0]
+                    except Exception:
+                        pass
+                    # Инициализируем счетчик для этого пути
+                    child_counters.setdefault(tuple(current_section_path), 0)
+                    self.logger.info(f"[num-debug] parent_after={current_section_path}")
+                restored_paragraphs.append(paragraph_text)
+                action_log = "keep: explicit header"
+                continue
+
             # Восстанавливаем нумерацию
             if list_position and len(list_position) >= 2 and list_position[1]:
-                # list_position[1] содержит массив уровней нумерации
                 numbering_levels = list_position[1]
-                
-                if numbering_levels:  # Если есть уровни нумерации
-                    # Создаем полную иерархическую нумерацию
-                    full_numbering = self._build_hierarchical_numbering(list_position, hierarchy_tracker)
-                    
-                    # Ищем паттерн нумерации в тексте (1), 2), 3) и т.д.)
+
+                # Если мы на верхнем уровне списка (levels = [N]) и корень известен, но parent пуст,
+                # трактуем это как заголовок раздела root.N и закрепляем current_section_path
+                if (not current_section_path):
+                    try:
+                        if isinstance(numbering_levels, list) and len(numbering_levels) == 1:
+                            top_lv = int(numbering_levels[0])
+                            m_top = re.match(r'^(\s*)(\d+)\)\s*(.*)$', paragraph_text)
+                            if m_top:
+                                indent = m_top.group(1)
+                                rest = m_top.group(3)
+                                # Если корень еще не зафиксирован, считаем root=1
+                                if last_root is None:
+                                    last_root = 1
+                                new_num = f"{last_root}.{top_lv}."
+                                current_section_path = [last_root, top_lv]
+                                child_counters.setdefault(tuple(current_section_path), 0)
+                                self.logger.info(f"[num-debug] promote top-level: root={last_root}, levels={numbering_levels} -> set parent={current_section_path}, emit={new_num}")
+                                restored_paragraphs.append(f"{indent}{new_num} {rest}")
+                                action_log = f"replace: promote {new_num}"
+                                continue
+                    except Exception:
+                        pass
+
+                # Если это строка простого списка вида "N) ..." и известен корень/родитель,
+                # строим абсолютный путь: [root] + levels (или [root, N] при depth==1)
+                simple_list_match = re.match(r'^(\s*)(\d+)\)\s*(.*)$', paragraph_text)
+                if simple_list_match and (current_section_path or last_root is not None):
+                    indent = simple_list_match.group(1)
+                    n_local = int(simple_list_match.group(2))
+                    rest = simple_list_match.group(3)
+                    try:
+                        depth = len(numbering_levels)
+                        root = current_section_path[0] if current_section_path else last_root
+                        if depth <= 1:
+                            parts = ([root, n_local] if root is not None else [n_local])
+                        else:
+                            abs_levels: List[int] = []
+                            for v in numbering_levels:
+                                try:
+                                    abs_levels.append(int(v))
+                                except Exception:
+                                    abs_levels.append(n_local)
+                            parts = ([root] if root is not None else []) + abs_levels
+                        new_num = '.'.join(str(x) for x in parts) + '.'
+                        self.logger.info(f"[num-debug] simple: parent={current_section_path}, levels={numbering_levels} -> {new_num}")
+                        restored_paragraphs.append(f"{indent}{new_num} {rest}")
+                        action_log = f"replace: simple {new_num}"
+                        continue
+                    except Exception:
+                        # в случае ошибки падать в старую логику ниже
+                        pass
+
+                # Детерминированная сборка номера из относительных уровней docx2python с префиксом текущего корня
+                if numbering_levels:
+                    # Пытаемся привести уровни к int
+                    lvl_parts: List[int] = []
+                    for v in numbering_levels:
+                        try:
+                            lvl_parts.append(int(v))
+                        except Exception:
+                            # пропускаем нечисловые — это не должно встречаться в уровнях
+                            pass
+                    # Детерминированно префиксуем корнем и строим абсолютный путь: [root] + levels
+                    root = current_section_path[0] if current_section_path else last_root
+                    if root is not None:
+                        lvl_parts = [root] + lvl_parts
+                    full_numbering = ".".join(str(x) for x in lvl_parts) + "."
                     pattern = r'^(\s*)(\d+\)\s*)(.*)$'
                     match = re.match(pattern, paragraph_text, re.MULTILINE)
-                    
                     if match:
                         indent = match.group(1)
-                        old_numbering = match.group(2)
                         content = match.group(3)
-                        
-                        # Заменяем старую нумерацию на полную иерархическую
-                        new_text = f"{indent}{full_numbering} {content}"
-                        restored_paragraphs.append(new_text)
+                        self.logger.info(f"[num-debug] legacy: parent={current_section_path}, levels={numbering_levels} -> {full_numbering}")
+                        restored_paragraphs.append(f"{indent}{full_numbering} {content}")
+                        action_log = f"replace: legacy {full_numbering}"
                     else:
-                        # Если не нашли паттерн, оставляем как есть
                         restored_paragraphs.append(paragraph_text)
+                        action_log = "keep: legacy no-match"
                 else:
                     restored_paragraphs.append(paragraph_text)
+                    action_log = "keep: no levels"
             else:
                 # Если нет list_position, проверяем на маркеры списков
                 if paragraph_text.strip().startswith('--'):
                     # Заменяем -- на • для маркеров списков
                     new_text = paragraph_text.replace('--', '•', 1)
                     restored_paragraphs.append(new_text)
+                    action_log = "replace: bullet -> •"
                 else:
                     # Оставляем как есть
                     restored_paragraphs.append(paragraph_text)
+                    action_log = "keep: plain"
+
+            # Итог по абзацу
+            self.logger.info(f"[num-debug] idx={i} action={action_log}")
         
         return "\n".join(restored_paragraphs)
     
@@ -387,10 +511,6 @@ class SmartChanker:
         """
         style_id, numbering_levels = list_position
         
-        # Если numbering_levels содержит несколько элементов, используем их как полную иерархию
-        if len(numbering_levels) > 1:
-            # Это случай типа [2, 1] для 1.2.1.
-            return ".".join(map(str, numbering_levels)) + "."
         
         # Определяем уровень иерархии по style_id
         # Поддерживаем произвольную глубину иерархии
@@ -805,7 +925,7 @@ class SmartChanker:
         return parser.get_sections_by_level(level)
 
     # ===== END-TO-END PIPELINE =====
-    def run_end_to_end(self, input_path: str) -> Dict[str, Any]:
+    def run_end_to_end(self, input_path: str, output_dir: Optional[str] = None) -> Dict[str, Any]:
         """
         Полная обработка одного исходного файла: DOC/DOCX -> плоский текст -> иерархический чанкинг
         Возвращает только итоговую структуру с sections/chunks/metadata без промежуточных полей.
@@ -813,6 +933,19 @@ class SmartChanker:
         # 1) Извлечь плоский текст комбинированным методом
         combined_result = self._process_with_combined_approach(input_path)
         combined_text = combined_result.get("combined_text", "")
+        extracted_text = combined_result.get("original_docx2python_text", "")
+
+        # Опционально сохраняем текст из _extract_text_with_docx2python
+        out_cfg = self.config.get("output", {})
+        if out_cfg.get("save_docx2python_text") and output_dir:
+            try:
+                base_name = Path(input_path).stem
+                suffix = out_cfg.get("docx2python_text_suffix", "_docx2python.txt")
+                out_file = os.path.join(output_dir, f"{base_name}{suffix}")
+                with open(out_file, "w", encoding="utf-8") as f:
+                    f.write(extracted_text or "")
+            except Exception as e:
+                self.logger.warning(f"Не удалось сохранить docx2python текст: {e}")
 
         # 2) Иерархический чанкинг
         hconf = self.config.get("hierarchical_chunking", {})
@@ -848,7 +981,7 @@ class SmartChanker:
 
         for file_path in files:
             try:
-                result = self.run_end_to_end(file_path)
+                result = self.run_end_to_end(file_path, output_dir)
                 results.append({"file_path": file_path})
                 summary["successful"] += 1
 

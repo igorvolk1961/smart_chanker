@@ -92,6 +92,9 @@ class HierarchyParser:
         i = 0
         max_paragraphs_after_table = 3  # используем общий конфиг-лимит
         
+        # Счетчики дочерних заголовков для детерминированной нумерации повторяющихся номеров
+        child_counters: Dict[str, int] = {}
+
         while i < len(lines):
             raw_line = lines[i]
             line = raw_line.strip()
@@ -166,7 +169,32 @@ class HierarchyParser:
                     self._finalize_flat_list(current_flat_list)
                     current_flat_list = None
                 
-                # Создаем новый раздел
+                # Детерминированная обработка повторяющихся номеров:
+                # Если номер совпадает с номером текущего раздела в стеке, трактуем как дочерний раздел
+                if hierarchy_stack and number == hierarchy_stack[-1].number:
+                    parent = hierarchy_stack[-1]
+                    # Получаем следующий индекс дочернего раздела
+                    cnt_key = parent.number
+                    next_idx = child_counters.get(cnt_key, 0) + 1
+                    child_counters[cnt_key] = next_idx
+                    synth_number = f"{parent.number}.{next_idx}"
+                    # Создаем дочерний раздел с синтетическим номером
+                    title = self._extract_title(line, number)
+                    new_section = SectionNode(
+                        number=synth_number,
+                        title=title,
+                        level=parent.level + 1,
+                        content=title,
+                        parent=parent
+                    )
+                    parent.children.append(new_section)
+                    self.sections.append(new_section)
+                    hierarchy_stack.append(new_section)
+                    last_section = new_section
+                    i += 1
+                    continue
+
+                # Создаем новый раздел (обычный случай)
                 new_section = self._create_section(line, number)
                 
                 # Определяем уровень вложенности
