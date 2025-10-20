@@ -65,6 +65,13 @@ class SmartChanker:
             "output": {
                 "format": "json",
                 "save_path": "./output"
+            },
+            "hierarchical_chunking": {
+                "enabled": False,
+                "target_level": 3,
+                "max_chunk_size": 1000,
+                "preserve_lists": True,
+                "include_parent_context": True
             }
         }
         
@@ -691,3 +698,107 @@ class SmartChanker:
                 "content": html_content
             }, ensure_ascii=False, indent=2)
             return f"```json\n{json_str}\n```"
+    
+    # ===== ИЕРАРХИЧЕСКИЙ ЧАНКИНГ =====
+    
+    def parse_hierarchy(self, text: str) -> List[Any]:
+        """
+        Парсит иерархию из плоского текста с нумерацией
+        
+        Args:
+            text: Плоский текст с нумерацией
+            
+        Returns:
+            Список корневых узлов иерархии
+        """
+        from .hierarchy_parser import HierarchyParser
+        
+        parser = HierarchyParser()
+        return parser.parse_hierarchy(text)
+    
+    def generate_semantic_chunks(self, text: str, target_level: int = 3, 
+                                max_chunk_size: int = 1000) -> List[Any]:
+        """
+        Генерирует семантические чанки из текста с иерархией
+        
+        Args:
+            text: Плоский текст с нумерацией
+            target_level: Целевой уровень для чанкинга
+            max_chunk_size: Максимальный размер чанка
+            
+        Returns:
+            Список семантических чанков
+        """
+        from .hierarchical_chunker import HierarchicalChunker
+        
+        # Создаем конфигурацию для иерархического чанкера
+        chunker_config = {
+            'target_level': target_level,
+            'max_chunk_size': max_chunk_size,
+            'preserve_lists': True,
+            'include_parent_context': True
+        }
+        
+        chunker = HierarchicalChunker(chunker_config)
+        result = chunker.process_text(text)
+        return result['chunks']
+    
+    def get_section_context(self, text: str, section_number: str) -> Dict[str, Any]:
+        """
+        Получает контекст раздела (родитель + дочерние разделы)
+        
+        Args:
+            text: Плоский текст с нумерацией
+            section_number: Номер раздела
+            
+        Returns:
+            Контекст раздела
+        """
+        from .hierarchical_chunker import HierarchicalChunker
+        
+        chunker = HierarchicalChunker(self.config)
+        return chunker.get_section_context(text, section_number)
+    
+    def process_with_hierarchical_chunking(self, text: str, 
+                                         target_level: int = 3,
+                                         max_chunk_size: int = 1000) -> Dict[str, Any]:
+        """
+        Обрабатывает текст с иерархическим чанкингом
+        
+        Args:
+            text: Плоский текст с нумерацией
+            target_level: Целевой уровень для чанкинга
+            max_chunk_size: Максимальный размер чанка
+            
+        Returns:
+            Результат обработки с чанками и метаданными
+        """
+        from .hierarchical_chunker import HierarchicalChunker
+        
+        # Создаем конфигурацию для иерархического чанкера
+        chunker_config = {
+            'target_level': target_level,
+            'max_chunk_size': max_chunk_size,
+            'preserve_lists': True,
+            'include_parent_context': True
+        }
+        
+        chunker = HierarchicalChunker(chunker_config)
+        return chunker.process_text(text)
+    
+    def get_sections_by_level(self, text: str, level: int) -> List[Any]:
+        """
+        Получает все разделы заданного уровня
+        
+        Args:
+            text: Плоский текст с нумерацией
+            level: Уровень разделов
+            
+        Returns:
+            Список разделов заданного уровня
+        """
+        from .hierarchy_parser import HierarchyParser
+        
+        parser = HierarchyParser()
+        sections = parser.parse_hierarchy(text)
+        return parser.get_sections_by_level(level)
