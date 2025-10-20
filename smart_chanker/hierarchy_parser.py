@@ -18,12 +18,15 @@ class SectionNode:
     parent: Optional['SectionNode'] = None
     children: List['SectionNode'] = None
     chunks: List[str] = None  # список ID чанков в разделе
+    tables: List[str] = None  # глобальные номера таблиц, встретившихся в разделе
     
     def __post_init__(self):
         if self.children is None:
             self.children = []
         if self.chunks is None:
             self.chunks = []
+        if self.tables is None:
+            self.tables = []
 
 
 @dataclass
@@ -47,6 +50,7 @@ class ChunkMetadata:
     char_count: int
     contains_lists: bool
     is_complete_section: bool
+    table_id: Optional[str] = None
 
 
 class HierarchyParser:
@@ -85,11 +89,74 @@ class HierarchyParser:
         hierarchy_stack = []
         current_flat_list = None
         last_section = None  # Последний созданный раздел
+        i = 0
+        max_paragraphs_after_table = 3  # используем общий конфиг-лимит
         
-        for line in lines:
-            line = line.strip()
+        while i < len(lines):
+            raw_line = lines[i]
+            line = raw_line.strip()
             if not line:
+                i += 1
                 continue
+            
+            # Попытка распознать начало таблицы: "Таблица N"
+            table_match = re.match(r'^Таблица\s+(\d+)\b', line, flags=re.IGNORECASE)
+            if table_match and hierarchy_stack:
+                table_num = table_match.group(1)
+                # Ищем fenced JSON блок в пределах max_paragraphs_after_table непустых абзацев
+                j = i + 1
+                non_empty_seen = 0
+                caption_line = None
+                fence_start = None
+                while j < len(lines) and non_empty_seen <= max_paragraphs_after_table:
+                    probe = lines[j]
+                    if probe.strip():
+                        non_empty_seen += 1
+                        # первая непустая строка после заголовка может быть подписью
+                        if caption_line is None and not probe.strip().startswith('```'):
+                            caption_line = probe.strip()
+                        if probe.strip().startswith('```json'):
+                            fence_start = j
+                            break
+                    j += 1
+                if fence_start is not None:
+                    # Найдем конец блока ```
+                    k = fence_start + 1
+                    fence_end = None
+                    while k < len(lines):
+                        if lines[k].strip().startswith('```'):
+                            fence_end = k
+                            break
+                        k += 1
+                    if fence_end is not None:
+                        # Создаем подраздел-таблицу
+                        parent = hierarchy_stack[-1]
+                        table_section_number = f"{parent.number}.T{table_num}"
+                        title_parts = [line]
+                        if caption_line:
+                            title_parts.append(caption_line)
+                        table_title = ' — '.join(title_parts)
+                        table_content_lines = [raw_line]
+                        if caption_line:
+                            table_content_lines.append(caption_line)
+                        table_content_lines.extend(lines[fence_start:fence_end+1])
+                        table_content = '\n'.join(table_content_lines)
+                        table_section = SectionNode(
+                            number=table_section_number,
+                            title=table_title,
+                            level=parent.level + 1,
+                            content=table_content,
+                            parent=parent
+                        )
+                        parent.children.append(table_section)
+                        # Регистрируем таблицу в родителе (глобальный номер)
+                        parent.tables.append(table_section_number)
+                        self.sections.append(table_section)
+                        last_section = table_section
+                        # Продолжаем после конца таблицы
+                        i = fence_end + 1
+                        continue
+                # Если не нашли корректный блок таблицы, продолжаем обычную обработку строки
             
             element_type, number = self._classify_element(line)
             
@@ -164,6 +231,7 @@ class HierarchyParser:
                         content=line
                     )
                     self.sections.append(current_section)
+            i += 1
         
         # Завершаем последний список
         if current_flat_list:

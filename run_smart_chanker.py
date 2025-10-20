@@ -28,9 +28,9 @@ def main():
         # Инициализируем SmartChanker
         chunker = SmartChanker(config_file)
         
-        # Обрабатываем папку
-        print("Начинаем обработку файлов...")
-        result = chunker.process_folder(input_folder)
+        # Полная обработка папки с сохранением только sections/chunks/metadata
+        print("Начинаем полную обработку файлов (end-to-end)...")
+        result = chunker.run_end_to_end_folder(input_folder, output_folder)
         
         # Выводим краткую статистику
         print(f"\nОбработка завершена!")
@@ -42,7 +42,7 @@ def main():
         if result['processed_files']:
             print(f"\nОбработанные файлы:")
             for file_info in result['processed_files']:
-                print(f"  - {os.path.basename(file_info['file_path'])}: {file_info['paragraphs_count']} параграфов")
+                print(f"  - {os.path.basename(file_info['file_path'])}")
         
         # Показываем ошибки, если есть
         if result['errors']:
@@ -50,26 +50,7 @@ def main():
             for error in result['errors']:
                 print(f"  - {os.path.basename(error['file'])}: {error['error']}")
         
-        # Сохраняем результат в JSON файл
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_file = os.path.join(output_folder, f"processing_result_{timestamp}.json")
-        
-        with open(output_file, 'w', encoding='utf-8') as f:
-            json.dump(result, f, ensure_ascii=False, indent=2)
-        
-        print(f"\nРезультат сохранен в файл: {output_file}")
-        
-        # Сохраняем обработанный текст для каждого файла
-        for file_info in result['processed_files']:
-            if 'combined_text' in file_info:
-                # Создаем имя файла для текста
-                base_name = os.path.splitext(os.path.basename(file_info['file_path']))[0]
-                text_file = os.path.join(output_folder, f"{base_name}_processed.txt")
-                
-                with open(text_file, 'w', encoding='utf-8') as f:
-                    f.write(file_info['combined_text'])
-                
-                print(f"Обработанный текст сохранен: {text_file}")
+        # Итоговые hierarchical.json файлы уже сохранены по одному на документ
         
         return result
         

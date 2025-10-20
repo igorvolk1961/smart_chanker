@@ -45,14 +45,29 @@ class SemanticChunker:
         """
         chunks = []
         
-        # Получаем разделы целевого уровня из плоского списка
-        target_sections = [section for section in sections if section.level == target_level]
+        # Целевые разделы: целевой уровень ИЛИ табличные подразделы ИЛИ листовые разделы с контентом
+        target_sections: List[SectionNode] = []
+        for section in sections:
+            if section.level == target_level:
+                target_sections.append(section)
+                continue
+            # Табличные подразделы имеют номер вида *.T{N}
+            if self._is_table_section(section):
+                target_sections.append(section)
+                continue
+            # Листовые разделы без детей, но с контентом
+            if not section.children and section.content and section.content.strip():
+                target_sections.append(section)
         
         for section in target_sections:
             section_chunks = self._chunk_section(section)
             chunks.extend(section_chunks)
         
         return chunks
+
+    def _is_table_section(self, section: SectionNode) -> bool:
+        """Определяет, является ли раздел табличным подразделом (* .T{N})."""
+        return '.T' in section.number
     
     def _chunk_section(self, section: SectionNode) -> List[Chunk]:
         """
@@ -177,6 +192,10 @@ class SemanticChunker:
         Returns:
             Список элементов
         """
+        # Если это таблица в fenced JSON, возвращаем одним элементом
+        stripped = content.strip()
+        if stripped.startswith('Таблица') and '```json' in stripped:
+            return [stripped]
         # Простая разбивка по абзацам
         elements = [line.strip() for line in content.split('\n') if line.strip()]
         return elements
@@ -207,6 +226,9 @@ class SemanticChunker:
         # Анализируем содержимое на наличие списков
         contains_lists = self._analyze_content_for_lists(section.content)
         
+        # table_id только для табличных разделов (*.T{N})
+        table_id: Optional[str] = section.number if self._is_table_section(section) else None
+        
         return ChunkMetadata(
             chunk_id=chunk_id,
             chunk_number=chunk_number,
@@ -217,6 +239,7 @@ class SemanticChunker:
             word_count=len(section.content.split()),
             char_count=len(section.content),
             contains_lists=contains_lists,
+            table_id=table_id,
             is_complete_section=is_complete
         )
     
@@ -281,3 +304,5 @@ class SemanticChunker:
                 return True
         
         return False
+
+    # Убрано: contains_table вычисляется по table_id (достаточно _is_table_section)

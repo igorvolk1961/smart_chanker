@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 import logging
+from datetime import datetime
 
 # Импорт инструментов обработки
 try:
@@ -802,3 +803,61 @@ class SmartChanker:
         parser = HierarchyParser()
         sections = parser.parse_hierarchy(text)
         return parser.get_sections_by_level(level)
+
+    # ===== END-TO-END PIPELINE =====
+    def run_end_to_end(self, input_path: str) -> Dict[str, Any]:
+        """
+        Полная обработка одного исходного файла: DOC/DOCX -> плоский текст -> иерархический чанкинг
+        Возвращает только итоговую структуру с sections/chunks/metadata без промежуточных полей.
+        """
+        # 1) Извлечь плоский текст комбинированным методом
+        combined_result = self._process_with_combined_approach(input_path)
+        combined_text = combined_result.get("combined_text", "")
+
+        # 2) Иерархический чанкинг
+        hconf = self.config.get("hierarchical_chunking", {})
+        target_level = hconf.get("target_level", 3)
+        max_chunk_size = hconf.get("max_chunk_size", 1000)
+        process_result = self.process_with_hierarchical_chunking(
+            combined_text,
+            target_level=target_level,
+            max_chunk_size=max_chunk_size,
+        )
+
+        # 3) Сформировать итоговый результат
+        return {
+            "file_path": input_path,
+            "sections": process_result.get("sections", []),
+            "chunks": process_result.get("chunks", []),
+            "metadata": {
+                **{k: v for k, v in process_result.get("metadata", {}).items()},
+                "created_at": datetime.utcnow().isoformat() + "Z",
+            },
+        }
+
+    def run_end_to_end_folder(self, folder_path: str, output_dir: str) -> Dict[str, Any]:
+        """
+        Полная обработка всех файлов в папке. Сохраняет в output_dir по файлу на каждый входной документ
+        только sections/chunks/metadata.
+        """
+        os.makedirs(output_dir, exist_ok=True)
+        files = self._get_files_to_process(folder_path)
+        summary = {"total_files": len(files), "successful": 0, "failed": 0}
+        results: List[Dict[str, Any]] = []
+        errors: List[Dict[str, Any]] = []
+
+        for file_path in files:
+            try:
+                result = self.run_end_to_end(file_path)
+                results.append({"file_path": file_path})
+                summary["successful"] += 1
+
+                base_name = Path(file_path).stem
+                out_file = os.path.join(output_dir, f"{base_name}_hierarchical.json")
+                with open(out_file, "w", encoding="utf-8") as f:
+                    json.dump(result, f, ensure_ascii=False, indent=2)
+            except Exception as e:
+                errors.append({"file": file_path, "error": str(e)})
+                summary["failed"] += 1
+
+        return {"processed_files": results, "errors": errors, "summary": summary}

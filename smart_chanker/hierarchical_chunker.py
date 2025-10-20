@@ -99,7 +99,8 @@ class HierarchicalChunker:
             'content': section.content,
             'parent_number': section.parent.number if section.parent else None,
             'children': [child.number for child in section.children],
-            'chunks': section.chunks
+            'chunks': section.chunks,
+            'tables': getattr(section, 'tables', [])
         }
     
     def _serialize_chunks(self, chunks: List[Chunk]) -> List[Dict[str, Any]]:
@@ -127,6 +128,13 @@ class HierarchicalChunker:
         Returns:
             Словарь с данными чанка
         """
+        # Дополнительные флаги таблиц в метаданных
+        contains_table = False
+        table_ids: List[str] = []
+        if hasattr(chunk.metadata, 'section_path'):
+            # признак по содержимому можно также вычислять заранее; оставим просто передачу
+            pass
+        
         return {
             'content': chunk.content,
             'metadata': {
@@ -139,9 +147,12 @@ class HierarchicalChunker:
                 'word_count': chunk.metadata.word_count,
                 'char_count': chunk.metadata.char_count,
                 'contains_lists': chunk.metadata.contains_lists,
+                'table_id': chunk.metadata.table_id,
                 'is_complete_section': chunk.metadata.is_complete_section
             }
         }
+
+    # helper for old logic removed; table_id в метаданных достаточно
     
     def get_chunks_by_level(self, text: str, level: int) -> List[Chunk]:
         """
