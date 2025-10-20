@@ -21,17 +21,14 @@ class HierarchicalChunker:
         self.config = config or self._get_default_config()
         self.parser = HierarchyParser()
         self.chunker = SemanticChunker(
-            max_chunk_size=self.config.get('max_chunk_size', 1000),
-            preserve_lists=self.config.get('preserve_lists', True)
+            max_chunk_size=self.config.get('max_chunk_size', 1000)
         )
     
     def _get_default_config(self) -> Dict[str, Any]:
         """Получает конфигурацию по умолчанию"""
         return {
             'target_level': 3,
-            'max_chunk_size': 1000,
-            'preserve_lists': True,
-            'include_parent_context': True
+            'max_chunk_size': 1000
         }
     
     def process_text(self, text: str) -> Dict[str, Any]:

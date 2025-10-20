@@ -1,8 +1,6 @@
 {
-  "tools": {
-    "combined_approach": {
-      "max_paragraphs_after_table": 3
-    }
+  "table_processing": {
+    "max_paragraphs_after_table": 3
   },
   "output": {
     "save_docx2python_text": true,
@@ -11,8 +9,6 @@
   "hierarchical_chunking": {
     "enabled": true,
     "target_level": 3,
-    "max_chunk_size": 1000,
-    "preserve_lists": true,
-    "include_parent_context": true
+    "max_chunk_size": 1000
   }
 }

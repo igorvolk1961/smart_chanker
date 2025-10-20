@@ -20,16 +20,14 @@ class Chunk:
 class SemanticChunker:
     """Генератор семантических чанков"""
     
-    def __init__(self, max_chunk_size: int = 1000, preserve_lists: bool = True):
+    def __init__(self, max_chunk_size: int = 1000):
         """
         Инициализация чанкера
         
         Args:
             max_chunk_size: Максимальный размер чанка в символах
-            preserve_lists: Сохранять ли плоские списки целиком
         """
         self.max_chunk_size = max_chunk_size
-        self.preserve_lists = preserve_lists
     
     def generate_chunks(self, sections: List[SectionNode], 
                        target_level: int = 3) -> List[Chunk]:

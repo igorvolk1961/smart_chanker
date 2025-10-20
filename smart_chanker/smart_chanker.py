@@ -73,8 +73,6 @@ class SmartChanker:
                 "enabled": False,
                 "target_level": 3,
                 "max_chunk_size": 1000,
-                "preserve_lists": True,
-                "include_parent_context": True
             }
         }
         
@@ -643,7 +641,7 @@ class SmartChanker:
             table_data = self._find_table_after_paragraph(
                 unstructured_elements, 
                 unstructured_para['index'],
-                self.config.get("tools", {}).get("combined_approach", {}).get("max_paragraphs_after_table", 3),
+                self.config.get("table_processing", {}).get("max_paragraphs_after_table", 3),
                 unstructured_table_paragraphs
             )
             
@@ -821,8 +819,6 @@ class SmartChanker:
         chunker_config = {
             'target_level': target_level,
             'max_chunk_size': max_chunk_size,
-            'preserve_lists': True,
-            'include_parent_context': True
         }
         
         chunker = HierarchicalChunker(chunker_config)
@@ -865,8 +861,6 @@ class SmartChanker:
         chunker_config = {
             'target_level': target_level,
             'max_chunk_size': max_chunk_size,
-            'preserve_lists': True,
-            'include_parent_context': True
         }
         
         chunker = HierarchicalChunker(chunker_config)
