@@ -319,10 +319,15 @@ class SmartChanker:
         import re
         
         restored_paragraphs = []
-        hierarchy_tracker = {}  # Отслеживаем текущие номера для каждого уровня (для старой логики)
-        current_section_path: List[int] = []  # Явная текущая секция из заголовков 1., 1.2., 1.2.3.
+        hierarchy_tracker = {}  # Отслеживаем текущие номера для каждого уровня
+        current_section_path: List[int] = []  # Текущая секция из заголовков 1., 1.2., 1.2.3.
         child_counters: Dict[tuple, int] = {}  # Счетчик дочерних заголовков для каждого пути
         last_root: Optional[int] = None       # Последний зафиксированный корневой номер (верхний уровень)
+        
+        # Стек для отслеживания текущей иерархии
+        hierarchy_stack = []
+        # Счетчики для каждого уровня
+        level_counters = {}
         
         for i, paragraph in enumerate(paragraphs):
             # Проверяем, что это объект Par
@@ -342,18 +347,9 @@ class SmartChanker:
             if hasattr(paragraph, 'list_position'):
                 list_position = paragraph.list_position
 
-            # Логируем базовую информацию по абзацу для диагностики восстановления нумерации
-            try:
-                style_name = getattr(paragraph, 'style', None)
-            except Exception:
-                style_name = None
-            try:
-                numbering_levels_dbg = list_position[1] if (list_position and len(list_position) >= 2) else None
-            except Exception:
-                numbering_levels_dbg = None
-            self.logger.info(
-                f"[docx2python:num] idx={i} style={style_name} list_position={list_position} levels={numbering_levels_dbg} text='{paragraph_text[:120].replace('\n',' ')}'"
-            )
+            # Логируем только важную информацию для диагностики
+            if list_position and len(list_position) >= 2 and list_position[1]:
+                self.logger.debug(f"[docx2python:num] idx={i} list_position={list_position} text='{paragraph_text[:50]}...'")
             
             # Обнаружение явного заголовка раздела вида "1.", "1.2.", "1.2.3."
             explicit_header = re.match(r'^\s*(\d+(?:\.\d+)*)\.(\s*)(.*)$', paragraph_text)
@@ -369,20 +365,17 @@ class SmartChanker:
 
                 # Если это повтор заголовка на том же пути — нумеруем как дочерний (без зависимости от стиля)
                 if header_path and current_section_path and header_path == current_section_path:
-                    self.logger.info(f"[num-debug] explicit repeat: parent_before={current_section_path}, header='{header_num_str}.' title='{after_text[:60]}'")
                     key = tuple(current_section_path)
                     next_idx = child_counters.get(key, 0) + 1
                     child_counters[key] = next_idx
                     new_path = current_section_path + [next_idx]
                     new_num = '.'.join(str(x) for x in new_path) + '.'
-                    self.logger.info(f"[num-debug] -> child='{new_num}', parent_after={current_section_path}, idx={next_idx}")
                     restored_paragraphs.append(f"{new_num}{after_space}{after_text}")
                     action_log = f"replace: explicit->child {new_num}"
                     continue
 
                 # Иначе считаем это установкой текущего пути секции
                 if header_path:
-                    self.logger.info(f"[num-debug] set parent from explicit: before={current_section_path} header='{header_num_str}.'")
                     current_section_path = header_path
                     # Зафиксируем текущий корневой номер
                     try:
@@ -391,96 +384,67 @@ class SmartChanker:
                         pass
                     # Инициализируем счетчик для этого пути
                     child_counters.setdefault(tuple(current_section_path), 0)
-                    self.logger.info(f"[num-debug] parent_after={current_section_path}")
                 restored_paragraphs.append(paragraph_text)
                 action_log = "keep: explicit header"
                 continue
 
-            # Восстанавливаем нумерацию
+            # Восстанавливаем нумерацию на основе list_position
             if list_position and len(list_position) >= 2 and list_position[1]:
                 numbering_levels = list_position[1]
-
-                # Если мы на верхнем уровне списка (levels = [N]) и корень известен, но parent пуст,
-                # трактуем это как заголовок раздела root.N и закрепляем current_section_path
-                if (not current_section_path):
-                    try:
-                        if isinstance(numbering_levels, list) and len(numbering_levels) == 1:
-                            top_lv = int(numbering_levels[0])
-                            m_top = re.match(r'^(\s*)(\d+)\)\s*(.*)$', paragraph_text)
-                            if m_top:
-                                indent = m_top.group(1)
-                                rest = m_top.group(3)
-                                # Если корень еще не зафиксирован, считаем root=1
-                                if last_root is None:
-                                    last_root = 1
-                                new_num = f"{last_root}.{top_lv}."
-                                current_section_path = [last_root, top_lv]
-                                child_counters.setdefault(tuple(current_section_path), 0)
-                                self.logger.info(f"[num-debug] promote top-level: root={last_root}, levels={numbering_levels} -> set parent={current_section_path}, emit={new_num}")
-                                restored_paragraphs.append(f"{indent}{new_num} {rest}")
-                                action_log = f"replace: promote {new_num}"
-                                continue
-                    except Exception:
-                        pass
-
-                # Если это строка простого списка вида "N) ..." и известен корень/родитель,
-                # строим абсолютный путь: [root] + levels (или [root, N] при depth==1)
+                
+                # Проверяем, что это пронумерованный список
                 simple_list_match = re.match(r'^(\s*)(\d+)\)\s*(.*)$', paragraph_text)
-                if simple_list_match and (current_section_path or last_root is not None):
+                if simple_list_match:
                     indent = simple_list_match.group(1)
                     n_local = int(simple_list_match.group(2))
                     rest = simple_list_match.group(3)
+                    
                     try:
-                        depth = len(numbering_levels)
-                        root = current_section_path[0] if current_section_path else last_root
-                        if depth <= 1:
-                            parts = ([root, n_local] if root is not None else [n_local])
+                        # Определяем уровень иерархии по отступам (табы и пробелы)
+                        # Считаем табы как 4 пробела каждый
+                        tab_count = indent.count('\t')
+                        space_count = len(indent) - tab_count
+                        level = tab_count + (space_count // 4)
+                        
+                        # Обновляем счетчики для текущего уровня
+                        if level not in level_counters:
+                            level_counters[level] = 0
+                        level_counters[level] = n_local
+                        
+                        # Обрезаем стек до текущего уровня
+                        hierarchy_stack = hierarchy_stack[:level]
+                        
+                        # Строим номер на основе текущей иерархии
+                        if level == 0:
+                            # Корневой уровень
+                            new_num = f"{n_local}."
+                            hierarchy_stack = [n_local]
                         else:
-                            abs_levels: List[int] = []
-                            for v in numbering_levels:
-                                try:
-                                    abs_levels.append(int(v))
-                                except Exception:
-                                    abs_levels.append(n_local)
-                            parts = ([root] if root is not None else []) + abs_levels
-                        new_num = '.'.join(str(x) for x in parts) + '.'
-                        self.logger.info(f"[num-debug] simple: parent={current_section_path}, levels={numbering_levels} -> {new_num}")
+                            # Подчиненный уровень
+                            if hierarchy_stack:
+                                # Добавляем к родительскому пути
+                                parent_path = hierarchy_stack.copy()
+                                parent_path.append(n_local)
+                                new_num = '.'.join(str(x) for x in parent_path) + '.'
+                                hierarchy_stack = parent_path
+                            else:
+                                # Если нет родителя, создаем новый корень
+                                new_num = f"{n_local}."
+                                hierarchy_stack = [n_local]
+                        
                         restored_paragraphs.append(f"{indent}{new_num} {rest}")
-                        action_log = f"replace: simple {new_num}"
+                        action_log = f"replace: level {level} -> {new_num}"
                         continue
-                    except Exception:
-                        # в случае ошибки падать в старую логику ниже
-                        pass
-
-                # Детерминированная сборка номера из относительных уровней docx2python с префиксом текущего корня
-                if numbering_levels:
-                    # Пытаемся привести уровни к int
-                    lvl_parts: List[int] = []
-                    for v in numbering_levels:
-                        try:
-                            lvl_parts.append(int(v))
-                        except Exception:
-                            # пропускаем нечисловые — это не должно встречаться в уровнях
-                            pass
-                    # Детерминированно префиксуем корнем и строим абсолютный путь: [root] + levels
-                    root = current_section_path[0] if current_section_path else last_root
-                    if root is not None:
-                        lvl_parts = [root] + lvl_parts
-                    full_numbering = ".".join(str(x) for x in lvl_parts) + "."
-                    pattern = r'^(\s*)(\d+\)\s*)(.*)$'
-                    match = re.match(pattern, paragraph_text, re.MULTILINE)
-                    if match:
-                        indent = match.group(1)
-                        content = match.group(3)
-                        self.logger.info(f"[num-debug] legacy: parent={current_section_path}, levels={numbering_levels} -> {full_numbering}")
-                        restored_paragraphs.append(f"{indent}{full_numbering} {content}")
-                        action_log = f"replace: legacy {full_numbering}"
-                    else:
+                            
+                    except Exception as e:
+                        self.logger.warning(f"Ошибка при обработке нумерации: {e}")
                         restored_paragraphs.append(paragraph_text)
-                        action_log = "keep: legacy no-match"
+                        action_log = "keep: error"
+                        continue
                 else:
+                    # Если это не пронумерованный список, оставляем как есть
                     restored_paragraphs.append(paragraph_text)
-                    action_log = "keep: no levels"
+                    action_log = "keep: not numbered"
             else:
                 # Если нет list_position, проверяем на маркеры списков
                 if paragraph_text.strip().startswith('--'):
@@ -493,8 +457,9 @@ class SmartChanker:
                     restored_paragraphs.append(paragraph_text)
                     action_log = "keep: plain"
 
-            # Итог по абзацу
-            self.logger.info(f"[num-debug] idx={i} action={action_log}")
+            # Итог по абзацу (только для отладки)
+            if action_log.startswith("replace"):
+                self.logger.debug(f"[num-debug] idx={i} action={action_log}")
         
         return "\n".join(restored_paragraphs)
     
@@ -567,7 +532,7 @@ class SmartChanker:
         
         for i, paragraph in enumerate(paragraphs):
             paragraph = paragraph.strip()
-            if paragraph.startswith('Таблица'):
+            if paragraph.lower().startswith('таблица'):
                 table_paragraphs.append({
                     'index': i,
                     'text': paragraph
@@ -590,7 +555,7 @@ class SmartChanker:
         for i, element in enumerate(elements):
             if hasattr(element, 'text') and element.text:
                 text = element.text.strip()
-                if text.startswith('Таблица'):
+                if text.lower().startswith('таблица'):
                     table_paragraphs.append({
                         'index': i,
                         'text': text,
