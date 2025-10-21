@@ -404,6 +404,93 @@ class SmartChanker:
         
         return False
     
+    def _chunk_table_of_contents(self, toc_text: str, max_chunk_size: int) -> List[Dict[str, Any]]:
+        """
+        Создает чанки из оглавления, не разбивая заголовки между чанками
+        
+        Args:
+            toc_text: Текст оглавления
+            max_chunk_size: Максимальный размер чанка
+            
+        Returns:
+            Список чанков оглавления
+        """
+        import uuid
+        
+        chunks = []
+        lines = [line.strip() for line in toc_text.split('\n') if line.strip()]
+        
+        current_chunk_lines = []
+        current_size = 0
+        chunk_number = 1
+        
+        for line in lines:
+            line_size = len(line) + 1  # +1 для символа новой строки
+            
+            # Если добавление этой строки превысит лимит и у нас уже есть строки
+            if current_size + line_size > max_chunk_size and current_chunk_lines:
+                # Создаем чанк из накопленных строк
+                chunk_content = '\n'.join(current_chunk_lines)
+                chunk_id = str(uuid.uuid4())
+                
+                metadata = {
+                    'chunk_id': chunk_id,
+                    'chunk_number': chunk_number,
+                    'section_path': ['Table of Contents'],
+                    'parent_section': 'Root',
+                    'section_level': 0,
+                    'children': [],
+                    'word_count': len(chunk_content.split()),
+                    'char_count': len(chunk_content),
+                    'contains_lists': False,
+                    'table_id': None,
+                    'is_complete_section': True,
+                    'start_pos': 0,
+                    'end_pos': len(chunk_content)
+                }
+                
+                chunks.append({
+                    'content': chunk_content,
+                    'metadata': metadata
+                })
+                
+                # Начинаем новый чанк
+                current_chunk_lines = []
+                current_size = 0
+                chunk_number += 1
+            
+            # Добавляем строку к текущему чанку
+            current_chunk_lines.append(line)
+            current_size += line_size
+        
+        # Создаем последний чанк, если есть накопленные строки
+        if current_chunk_lines:
+            chunk_content = '\n'.join(current_chunk_lines)
+            chunk_id = str(uuid.uuid4())
+            
+            metadata = {
+                'chunk_id': chunk_id,
+                'chunk_number': chunk_number,
+                'section_path': ['Table of Contents'],
+                'parent_section': 'Root',
+                'section_level': 0,
+                'children': [],
+                'word_count': len(chunk_content.split()),
+                'char_count': len(chunk_content),
+                'contains_lists': False,
+                'table_id': None,
+                'is_complete_section': True,
+                'start_pos': 0,
+                'end_pos': len(chunk_content)
+            }
+            
+            chunks.append({
+                'content': chunk_content,
+                'metadata': metadata
+            })
+        
+        return chunks
+    
     def _extract_all_paragraphs(self, data, level=0):
         """
         Рекурсивно извлекает все объекты Par из вложенной структуры docx2python
@@ -1059,12 +1146,7 @@ class SmartChanker:
         toc_chunks = []
         if toc_text:
             try:
-                toc_process_result = self.process_with_hierarchical_chunking(
-                    toc_text,
-                    target_level=1,  # Оглавление обычно имеет простую структуру
-                    max_chunk_size=max_chunk_size,
-                )
-                toc_chunks = toc_process_result.get("chunks", [])
+                toc_chunks = self._chunk_table_of_contents(toc_text, max_chunk_size)
             except Exception as e:
                 self.logger.warning(f"Не удалось обработать оглавление: {e}")
 
