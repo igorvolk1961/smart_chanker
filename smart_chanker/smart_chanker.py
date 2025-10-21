@@ -25,6 +25,9 @@ except ImportError:
     DOCX2PYTHON_AVAILABLE = False
     logging.warning("Пакет docx2python не установлен")
 
+# Импорт внутренних модулей
+from .numbering_restorer import NumberingRestorer
+
 
 class SmartChanker:
     """
@@ -41,6 +44,7 @@ class SmartChanker:
         self.config_path = config_path
         self.config = self._load_config()
         self.logger = self._setup_logger()
+        self.numbering_restorer = NumberingRestorer(self.logger)
         
         # Проверка доступности инструментов
         self._check_tools_availability()
@@ -269,7 +273,7 @@ class SmartChanker:
             all_paragraphs = self._extract_all_paragraphs(doc.document_pars)
             
             # Восстанавливаем нумерацию
-            restored_text = self._restore_numbering_in_paragraphs(all_paragraphs)
+            restored_text = self.numbering_restorer.restore_numbering_in_paragraphs(all_paragraphs)
             
             doc.close()
             return restored_text
@@ -299,7 +303,7 @@ class SmartChanker:
             all_paragraphs = self._extract_all_paragraphs(doc.document_pars)
             
             # Восстанавливаем нумерацию для всех параграфов
-            restored_paragraphs = self._restore_numbering_in_paragraphs(all_paragraphs)
+            restored_paragraphs = self.numbering_restorer.restore_numbering_in_paragraphs(all_paragraphs)
             
             # Разбиваем на строки для обработки
             lines = restored_paragraphs.split('\n')
@@ -1132,6 +1136,18 @@ class SmartChanker:
             except Exception as e:
                 self.logger.warning(f"Не удалось извлечь оглавление: {e}")
 
+        # 1.6) Сохраняем параграфы с list_position
+        if input_path.lower().endswith('.docx') and output_dir:
+            try:
+                list_position_paragraphs = self._extract_list_position_paragraphs(input_path)
+                if list_position_paragraphs:
+                    base_name = Path(input_path).stem
+                    list_pos_file = os.path.join(output_dir, f"{base_name}_list_positions.json")
+                    with open(list_pos_file, "w", encoding="utf-8") as f:
+                        json.dump(list_position_paragraphs, f, ensure_ascii=False, indent=2)
+            except Exception as e:
+                self.logger.warning(f"Не удалось извлечь list_position: {e}")
+
         # 2) Иерархический чанкинг основного текста
         hconf = self.config.get("hierarchical_chunking", {})
         target_level = hconf.get("target_level", 3)
@@ -1189,3 +1205,32 @@ class SmartChanker:
                 summary["failed"] += 1
 
         return {"processed_files": results, "errors": errors, "summary": summary}
+    
+    def _extract_list_position_paragraphs(self, file_path: str) -> List[Dict[str, Any]]:
+        """
+        Извлекает параграфы с непустым list_position
+        
+        Args:
+            file_path: Путь к DOCX файлу
+            
+        Returns:
+            Список параграфов с list_position и text
+        """
+        if not DOCX2PYTHON_AVAILABLE:
+            raise ImportError("Пакет docx2python недоступен")
+        
+        try:
+            doc = docx2python(file_path)
+            
+            # Извлекаем все параграфы
+            all_paragraphs = self._extract_all_paragraphs(doc.document_pars)
+            
+            # Используем NumberingRestorer для извлечения list_position
+            list_position_paragraphs = self.numbering_restorer.extract_list_position_paragraphs(all_paragraphs)
+            
+            doc.close()
+            return list_position_paragraphs
+            
+        except Exception as e:
+            self.logger.error(f"Ошибка при извлечении list_position: {e}")
+            return []

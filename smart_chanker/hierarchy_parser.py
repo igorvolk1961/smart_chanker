@@ -19,6 +19,7 @@ class SectionNode:
     children: List['SectionNode'] = None
     chunks: List[str] = None  # список ID чанков в разделе
     tables: List[str] = None  # глобальные номера таблиц, встретившихся в разделе
+    list_position: Optional[tuple] = None  # list_position из docx2python
     
     def __post_init__(self):
         if self.children is None:
@@ -53,6 +54,7 @@ class ChunkMetadata:
     start_pos: int  # позиция начала чанка в разделе
     end_pos: int    # позиция конца чанка в разделе
     table_id: Optional[str] = None
+    list_position: Optional[tuple] = None  # list_position из docx2python
 
 
 class HierarchyParser:
@@ -73,7 +75,7 @@ class HierarchyParser:
             'bulleted': re.compile(r'^\s*([•\-*])\s*')
         }
     
-    def parse_hierarchy(self, text: str) -> List[SectionNode]:
+    def parse_hierarchy(self, text: str, list_positions: Optional[List[tuple]] = None) -> List[SectionNode]:
         """
         Парсит иерархию из плоского текста
         

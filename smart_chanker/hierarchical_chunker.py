@@ -97,7 +97,8 @@ class HierarchicalChunker:
             'parent_number': section.parent.number if section.parent else None,
             'children': [child.number for child in section.children],
             'chunks': section.chunks,
-            'tables': getattr(section, 'tables', [])
+            'tables': getattr(section, 'tables', []),
+            'list_position': getattr(section, 'list_position', None)
         }
     
     def _serialize_chunks(self, chunks: List[Chunk]) -> List[Dict[str, Any]]:
