@@ -107,7 +107,10 @@ class SemanticChunker:
             Семантический чанк
         """
         chunk_id = str(uuid.uuid4())
-        metadata = self._create_chunk_metadata(section, chunk_id, chunk_number, is_complete=True)
+        # Для полного раздела start_pos = 0, end_pos = длина контента
+        start_pos = 0
+        end_pos = len(section.content)
+        metadata = self._create_chunk_metadata(section, chunk_id, chunk_number, is_complete=True, start_pos=start_pos, end_pos=end_pos)
         
         # Добавляем ID чанка в раздел
         section.chunks.append(chunk_id)
@@ -132,6 +135,7 @@ class SemanticChunker:
         current_chunk_content = []
         current_size = 0
         chunk_number = 1
+        current_pos = 0  # Текущая позиция в разделе
         
         # Разбиваем контент на элементы
         elements = self._split_content_to_elements(section.content)
@@ -144,7 +148,12 @@ class SemanticChunker:
                 # Создаем чанк из накопленного контента
                 chunk_content = '\n'.join(current_chunk_content)
                 chunk_id = str(uuid.uuid4())
-                metadata = self._create_chunk_metadata(section, chunk_id, chunk_number, is_complete=False)
+                
+                # Вычисляем позиции для текущего чанка
+                start_pos = current_pos - current_size
+                end_pos = current_pos
+                
+                metadata = self._create_chunk_metadata(section, chunk_id, chunk_number, is_complete=False, start_pos=start_pos, end_pos=end_pos)
                 
                 # Добавляем ID чанка в раздел
                 section.chunks.append(chunk_id)
@@ -162,12 +171,18 @@ class SemanticChunker:
             
             current_chunk_content.append(element)
             current_size += element_size
+            current_pos += element_size + 1  # +1 для символа новой строки
         
         # Создаем последний чанк
         if current_chunk_content:
             chunk_content = '\n'.join(current_chunk_content)
             chunk_id = str(uuid.uuid4())
-            metadata = self._create_chunk_metadata(section, chunk_id, chunk_number, is_complete=False)
+            
+            # Вычисляем позиции для последнего чанка
+            start_pos = current_pos - current_size
+            end_pos = current_pos
+            
+            metadata = self._create_chunk_metadata(section, chunk_id, chunk_number, is_complete=False, start_pos=start_pos, end_pos=end_pos)
             
             # Добавляем ID чанка в раздел
             section.chunks.append(chunk_id)
@@ -199,7 +214,8 @@ class SemanticChunker:
         return elements
     
     def _create_chunk_metadata(self, section: SectionNode, chunk_id: str, 
-                              chunk_number: int, is_complete: bool) -> ChunkMetadata:
+                              chunk_number: int, is_complete: bool, 
+                              start_pos: int = 0, end_pos: int = 0) -> ChunkMetadata:
         """
         Создает метаданные для чанка
         
@@ -208,6 +224,8 @@ class SemanticChunker:
             chunk_id: Уникальный ID чанка
             chunk_number: Порядковый номер чанка в разделе
             is_complete: Полный ли это раздел
+            start_pos: Позиция начала чанка в разделе
+            end_pos: Позиция конца чанка в разделе
             
         Returns:
             Метаданные чанка
@@ -238,7 +256,9 @@ class SemanticChunker:
             char_count=len(section.content),
             contains_lists=contains_lists,
             table_id=table_id,
-            is_complete_section=is_complete
+            is_complete_section=is_complete,
+            start_pos=start_pos,
+            end_pos=end_pos
         )
     
     def _build_section_path(self, section: SectionNode) -> List[str]:

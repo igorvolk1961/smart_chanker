@@ -145,7 +145,9 @@ class HierarchicalChunker:
                 'char_count': chunk.metadata.char_count,
                 'contains_lists': chunk.metadata.contains_lists,
                 'table_id': chunk.metadata.table_id,
-                'is_complete_section': chunk.metadata.is_complete_section
+                'is_complete_section': chunk.metadata.is_complete_section,
+                'start_pos': chunk.metadata.start_pos,
+                'end_pos': chunk.metadata.end_pos
             }
         }
 

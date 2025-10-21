@@ -50,6 +50,8 @@ class ChunkMetadata:
     char_count: int
     contains_lists: bool
     is_complete_section: bool
+    start_pos: int  # позиция начала чанка в разделе
+    end_pos: int    # позиция конца чанка в разделе
     table_id: Optional[str] = None
 
 

@@ -278,6 +278,132 @@ class SmartChanker:
             self.logger.error(f"Ошибка при извлечении текста с docx2python: {e}")
             return ""
     
+    def _extract_table_of_contents(self, file_path: str) -> str:
+        """
+        Извлекает оглавление документа из номеров и заголовков разделов и таблиц
+        с использованием восстановленной нумерации
+        
+        Args:
+            file_path: Путь к DOCX файлу
+            
+        Returns:
+            Текст оглавления с восстановленной нумерацией
+        """
+        if not DOCX2PYTHON_AVAILABLE:
+            raise ImportError("Пакет docx2python недоступен")
+        
+        try:
+            doc = docx2python(file_path)
+            
+            # Извлекаем все параграфы
+            all_paragraphs = self._extract_all_paragraphs(doc.document_pars)
+            
+            # Восстанавливаем нумерацию для всех параграфов
+            restored_paragraphs = self._restore_numbering_in_paragraphs(all_paragraphs)
+            
+            # Разбиваем на строки для обработки
+            lines = restored_paragraphs.split('\n')
+            
+            toc_lines = []
+            
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                
+                # Проверяем, является ли это заголовком раздела с восстановленной нумерацией
+                if self._is_section_header_restored(line):
+                    toc_lines.append(line)
+                # Проверяем, является ли это таблицей
+                elif self._is_table_reference(line):
+                    toc_lines.append(line)
+            
+            doc.close()
+            return "\n".join(toc_lines)
+            
+        except Exception as e:
+            self.logger.error(f"Ошибка при извлечении оглавления: {e}")
+            return ""
+    
+    def _is_section_header(self, text: str) -> bool:
+        """
+        Проверяет, является ли текст заголовком раздела
+        
+        Args:
+            text: Текст для проверки
+            
+        Returns:
+            True если это заголовок раздела
+        """
+        import re
+        
+        # Паттерны для заголовков разделов
+        patterns = [
+            r'^\s*\d+(?:\.\d+)*\.\s+',  # 1., 1.1., 1.1.1.
+            r'^\s*\d+\)\s+',            # 1), 2), 3)
+            r'^\s*[IVX]+\.\s+',         # I., II., III.
+            r'^\s*[ivx]+\.\s+',         # i., ii., iii.
+        ]
+        
+        for pattern in patterns:
+            if re.match(pattern, text):
+                return True
+        
+        return False
+    
+    def _is_section_header_restored(self, text: str) -> bool:
+        """
+        Проверяет, является ли текст заголовком раздела с восстановленной нумерацией
+        
+        Args:
+            text: Текст для проверки
+            
+        Returns:
+            True если это заголовок раздела с восстановленной нумерацией
+        """
+        import re
+        
+        # Паттерны для заголовков разделов с восстановленной нумерацией
+        patterns = [
+            r'^\s*\d+(?:\.\d+)*\.\s+',  # 1., 1.1., 1.1.1. (восстановленная нумерация)
+            r'^\s*\d+\)\s+',            # 1), 2), 3)
+            r'^\s*[IVX]+\.\s+',         # I., II., III.
+            r'^\s*[ivx]+\.\s+',         # i., ii., iii.
+        ]
+        
+        for pattern in patterns:
+            if re.match(pattern, text):
+                return True
+        
+        return False
+    
+    def _is_table_reference(self, text: str) -> bool:
+        """
+        Проверяет, является ли текст ссылкой на таблицу
+        
+        Args:
+            text: Текст для проверки
+            
+        Returns:
+            True если это ссылка на таблицу
+        """
+        import re
+        
+        # Паттерны для ссылок на таблицы
+        patterns = [
+            r'Таблица\s+\d+',
+            r'таблица\s+\d+',
+            r'ТАБЛИЦА\s+\d+',
+            r'Table\s+\d+',
+            r'table\s+\d+',
+        ]
+        
+        for pattern in patterns:
+            if re.search(pattern, text, re.IGNORECASE):
+                return True
+        
+        return False
+    
     def _extract_all_paragraphs(self, data, level=0):
         """
         Рекурсивно извлекает все объекты Par из вложенной структуры docx2python
@@ -906,7 +1032,20 @@ class SmartChanker:
             except Exception as e:
                 self.logger.warning(f"Не удалось сохранить docx2python текст: {e}")
 
-        # 2) Иерархический чанкинг
+        # 1.5) Извлекаем оглавление документа
+        toc_text = ""
+        if input_path.lower().endswith('.docx'):
+            try:
+                toc_text = self._extract_table_of_contents(input_path)
+                if output_dir and toc_text:
+                    base_name = Path(input_path).stem
+                    toc_file = os.path.join(output_dir, f"{base_name}_toc.txt")
+                    with open(toc_file, "w", encoding="utf-8") as f:
+                        f.write(toc_text)
+            except Exception as e:
+                self.logger.warning(f"Не удалось извлечь оглавление: {e}")
+
+        # 2) Иерархический чанкинг основного текста
         hconf = self.config.get("hierarchical_chunking", {})
         target_level = hconf.get("target_level", 3)
         max_chunk_size = hconf.get("max_chunk_size", 1000)
@@ -916,14 +1055,29 @@ class SmartChanker:
             max_chunk_size=max_chunk_size,
         )
 
+        # 2.5) Чанкинг оглавления
+        toc_chunks = []
+        if toc_text:
+            try:
+                toc_process_result = self.process_with_hierarchical_chunking(
+                    toc_text,
+                    target_level=1,  # Оглавление обычно имеет простую структуру
+                    max_chunk_size=max_chunk_size,
+                )
+                toc_chunks = toc_process_result.get("chunks", [])
+            except Exception as e:
+                self.logger.warning(f"Не удалось обработать оглавление: {e}")
+
         # 3) Сформировать итоговый результат
         return {
             "file_path": input_path,
             "sections": process_result.get("sections", []),
             "chunks": process_result.get("chunks", []),
+            "toc_chunks": toc_chunks,  # Чанки оглавления
             "metadata": {
                 **{k: v for k, v in process_result.get("metadata", {}).items()},
                 "created_at": datetime.utcnow().isoformat() + "Z",
+                "has_toc": bool(toc_text),
             },
         }
 
