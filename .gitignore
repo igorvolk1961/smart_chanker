@@ -145,9 +145,7 @@ ehthumbs.db
 Thumbs.db
 
 # Project specific
+data/input/
 data/output/
 logs/
 *.log
-
-# Keep data/input/ but ignore output files
-!data/input/

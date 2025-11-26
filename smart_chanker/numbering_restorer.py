@@ -74,6 +74,11 @@ class NumberingRestorer:
                     restored_paragraphs.append(content)
                     continue
                 
+                # Пропускаем скрытые параграфы из Word (только номер и табуляция, без текста)
+                # Такие параграфы создают пустые разделы и дубликаты
+                if not content.strip():
+                    continue
+                
                 restored_text = f"{restored_numbering} {content}"
                 restored_paragraphs.append(restored_text)
                 
