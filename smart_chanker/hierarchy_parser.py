@@ -98,6 +98,15 @@ class HierarchyParser:
         
         # Счетчики дочерних заголовков для детерминированной нумерации повторяющихся номеров
         child_counters: Dict[str, int] = {}
+        
+        # Контекст для различения многоуровневой нумерации и плоских списков
+        numbering_context = {
+            'is_first_1_dot': True,  # Первое появление "1." - начало многоуровневой нумерации
+            'last_upper_level': None,  # Последний номер раздела верхнего уровня
+            'last_flat_list': None,    # Последний номер плоского списка
+            'deferred_decision': None, # Отложенное решение
+            'in_flat_list': False      # Находимся ли в плоском списке
+        }
 
         while i < len(lines):
             raw_line = lines[i]
@@ -165,7 +174,7 @@ class HierarchyParser:
                         continue
                 # Если не нашли корректный блок таблицы, продолжаем обычную обработку строки
             
-            element_type, number = self._classify_element(line)
+            element_type, number = self._classify_element(line, numbering_context)
             
             if element_type == 'multi_level':
                 # Завершаем текущий плоский список
@@ -223,7 +232,7 @@ class HierarchyParser:
                 # Запоминаем последний созданный раздел
                 last_section = new_section
                 
-            elif element_type in ['simple_numbered', 'lettered', 'bulleted']:
+            elif element_type in ['simple_numbered', 'lettered', 'bulleted', 'flat_list']:
                 # Плоские списки добавляются к текущему разделу, если он есть
                 if hierarchy_stack:
                     # Добавляем к текущему разделу
@@ -243,6 +252,11 @@ class HierarchyParser:
                         
                         # Создаем новый список
                         current_flat_list = self._create_flat_list(line, element_type)
+                
+                # Обновляем контекст для плоских списков
+                if element_type == 'flat_list' and number:
+                    numbering_context['last_flat_list'] = int(number)
+                    numbering_context['in_flat_list'] = True
                     
             else:  # paragraph
                 # Завершаем текущий список
@@ -271,16 +285,59 @@ class HierarchyParser:
         
         return self.sections
     
-    def _classify_element(self, text: str) -> Tuple[str, Optional[str]]:
+    def _classify_element(self, text: str, context: Dict) -> Tuple[str, Optional[str]]:
         """
-        Классифицирует элемент текста по типу нумерации
+        Классифицирует элемент текста по типу нумерации с учетом контекста
         
         Args:
             text: Строка для анализа
+            context: Контекст для различения типов нумерации
             
         Returns:
             Кортеж (тип_элемента, номер)
         """
+        # Проверяем многоуровневую нумерацию (1.1., 1.1.1., 2.3.4.)
+        multi_level_match = re.match(r'^(\s*)(\d+(?:\.\d+)+)\.\s*(.*)$', text)
+        if multi_level_match:
+            number = multi_level_match.group(2)
+            # Многоуровневая нумерация - всегда создаем раздел
+            context['in_flat_list'] = False
+            return 'multi_level', number
+        
+        # Проверяем простую нумерацию (1., 2., 3.)
+        simple_dot_match = re.match(r'^(\s*)(\d+)\.\s*(.*)$', text)
+        if simple_dot_match:
+            n_local = int(simple_dot_match.group(2))
+            
+            # Специальная логика для начала документа
+            if context['is_first_1_dot'] and n_local == 1:
+                # Первое появление "1." - всегда многоуровневая нумерация
+                context['is_first_1_dot'] = False
+                context['in_flat_list'] = False
+                context['last_upper_level'] = n_local
+                return 'multi_level', str(n_local)
+            
+            # Применяем сложную логику для различения типов нумерации
+            numbering_type = self._analyze_numbering_type(text, context)
+            
+            if numbering_type == 'flat_list':
+                # Это плоский список - не создаем раздел
+                return 'flat_list', str(n_local)
+            elif numbering_type == 'multilevel_start':
+                # Начало многоуровневой нумерации
+                context['is_first_1_dot'] = False
+                context['in_flat_list'] = False
+                context['last_upper_level'] = n_local
+                return 'multi_level', str(n_local)
+            elif numbering_type == 'multilevel_continuation':
+                # Продолжение многоуровневой нумерации
+                context['in_flat_list'] = False
+                return 'multi_level', str(n_local)
+            else:
+                # По умолчанию - плоский список
+                return 'flat_list', str(n_local)
+        
+        # Проверяем другие типы нумерации
         for pattern_name, pattern in self.patterns.items():
             match = pattern.match(text)
             if match and self._is_likely_numbering(text, match):
@@ -288,6 +345,110 @@ class HierarchyParser:
                 return pattern_name, number
         
         return 'paragraph', None
+    
+    def _analyze_numbering_type(self, text: str, context: Dict) -> str:
+        """
+        Анализирует тип нумерации на основе эвристики
+        
+        Args:
+            text: Текст параграфа
+            context: Контекст нумерации
+            
+        Returns:
+            str: Тип нумерации ('multilevel_start', 'multilevel_continuation', 'flat_list', 'deferred_decision', 'plain_text')
+        """
+        import re
+        
+        # Проверяем явные заголовки (1.2.3. Текст) - только многоуровневые
+        explicit_header = re.match(r'^\s*(\d+(?:\.\d+){2,})\.(\s*)(.*)$', text)
+        if explicit_header:
+            # Это многоуровневая нумерация (минимум 2 уровня: 1.1., 1.1.1., 2.3.4.)
+            return 'multilevel_continuation'
+        
+        # Проверяем простую нумерацию с точкой (1., 2., 3.)
+        simple_dot_match = re.match(r'^(\s*)(\d+)\.\s*(.*)$', text)
+        if simple_dot_match:
+            n_local = int(simple_dot_match.group(2))
+            
+            # Если мы в плоском списке
+            if context['in_flat_list']:
+                return 'flat_list'
+            
+            # Проверяем отложенное решение
+            if context['deferred_decision'] is not None:
+                return self._resolve_deferred_decision(n_local, context)
+            
+            # Анализируем контекст
+            return self._analyze_simple_numbering_context(n_local, context)
+        
+        return 'plain_text'
+    
+    def _analyze_simple_numbering_context(self, number: int, context: Dict) -> str:
+        """
+        Анализирует контекст простой нумерации
+        
+        Args:
+            number: Номер
+            context: Контекст нумерации
+            
+        Returns:
+            str: Тип нумерации
+        """
+        # Если мы находимся в плоском списке - продолжение списка
+        if context['in_flat_list']:
+            return 'flat_list'
+        
+        # Если номер больше последнего номера плоского списка - продолжение списка
+        if context['last_flat_list'] is not None and number > context['last_flat_list']:
+            return 'flat_list'
+        
+        # Если номер равен последнему номеру верхнего уровня - отложить решение
+        if context['last_upper_level'] is not None and number == context['last_upper_level']:
+            # Специальная проверка: если это повторное появление "1." в контексте многоуровневой структуры
+            # это однозначно вложенный плоский список
+            if number == 1:
+                return 'flat_list'
+            
+            context['deferred_decision'] = number
+            return 'deferred_decision'
+        
+        # Если номер меньше последнего номера верхнего уровня - многоуровневая нумерация
+        if context['last_upper_level'] is not None and number < context['last_upper_level']:
+            return 'multilevel_continuation'
+        
+        # Если номер равен 1 и мы не в начале документа - это плоский список
+        if number == 1 and context['last_upper_level'] is not None:
+            return 'flat_list'
+        
+        # Если мы находимся в многоуровневой структуре - это продолжение
+        if context['last_upper_level'] is not None and not context['in_flat_list']:
+            return 'multilevel_continuation'
+        
+        # По умолчанию - плоский список (более безопасно)
+        return 'flat_list'
+    
+    def _resolve_deferred_decision(self, number: int, context: Dict) -> str:
+        """
+        Разрешает отложенное решение на основе следующего номера
+        
+        Args:
+            number: Текущий номер
+            context: Контекст нумерации
+            
+        Returns:
+            str: Тип нумерации
+        """
+        if context['deferred_decision'] is None:
+            return 'flat_list'
+        
+        # Если номер увеличился на 1 - продолжение плоского списка
+        if number == context['deferred_decision'] + 1:
+            context['deferred_decision'] = None
+            return 'flat_list'
+        
+        # Если номер не изменился или изменился по-другому - многоуровневая нумерация
+        context['deferred_decision'] = None
+        return 'multilevel_continuation'
     
     def _is_likely_numbering(self, text: str, match: re.Match) -> bool:
         """

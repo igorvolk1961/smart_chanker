@@ -71,7 +71,7 @@ class SmartChanker:
                 "format": "json",
                 "save_path": "./output",
                 "save_docx2python_text": False,
-                "docx2python_text_suffix": "_docx2python.txt"
+                "save_list_positions": False
             },
             "hierarchical_chunking": {
                 "enabled": False,
@@ -1116,8 +1116,7 @@ class SmartChanker:
         if out_cfg.get("save_docx2python_text") and output_dir:
             try:
                 base_name = Path(input_path).stem
-                suffix = out_cfg.get("docx2python_text_suffix", "_docx2python.txt")
-                out_file = os.path.join(output_dir, f"{base_name}{suffix}")
+                out_file = os.path.join(output_dir, f"{base_name}_docx2python.txt")
                 with open(out_file, "w", encoding="utf-8") as f:
                     f.write(extracted_text or "")
             except Exception as e:
@@ -1136,8 +1135,10 @@ class SmartChanker:
             except Exception as e:
                 self.logger.warning(f"Не удалось извлечь оглавление: {e}")
 
-        # 1.6) Сохраняем параграфы с list_position
-        if input_path.lower().endswith('.docx') and output_dir:
+        # 1.6) Сохраняем параграфы с list_position (опционально)
+        out_cfg = self.config.get("output", {})
+        if (input_path.lower().endswith('.docx') and output_dir and 
+            out_cfg.get("save_list_positions", False)):
             try:
                 list_position_paragraphs = self._extract_list_position_paragraphs(input_path)
                 if list_position_paragraphs:
