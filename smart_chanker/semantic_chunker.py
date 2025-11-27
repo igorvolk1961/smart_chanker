@@ -258,7 +258,8 @@ class SemanticChunker:
             table_id=table_id,
             is_complete_section=is_complete,
             start_pos=start_pos,
-            end_pos=end_pos
+            end_pos=end_pos,
+            list_position=None  # Убираем list_position
         )
     
     def _build_section_path(self, section: SectionNode) -> List[str]:

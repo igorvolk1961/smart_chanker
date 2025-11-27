@@ -97,8 +97,6 @@ class HierarchicalChunker:
             'parent_number': section.parent.number if section.parent else None,
             'children': [child.number for child in section.children],
             'chunks': section.chunks,
-            'tables': getattr(section, 'tables', []),
-            'list_position': getattr(section, 'list_position', None)
         }
     
     def _serialize_chunks(self, chunks: List[Chunk]) -> List[Dict[str, Any]]:
@@ -133,23 +131,25 @@ class HierarchicalChunker:
             # признак по содержимому можно также вычислять заранее; оставим просто передачу
             pass
         
+        metadata_dict = {
+            'chunk_id': chunk.metadata.chunk_id,
+            'chunk_number': chunk.metadata.chunk_number,
+            'section_path': chunk.metadata.section_path,
+            'parent_section': chunk.metadata.parent_section,
+            'section_level': chunk.metadata.section_level,
+            'children': chunk.metadata.children,
+            'word_count': chunk.metadata.word_count,
+            'char_count': chunk.metadata.char_count,
+            'contains_lists': chunk.metadata.contains_lists,
+            'table_id': chunk.metadata.table_id,
+            'is_complete_section': chunk.metadata.is_complete_section,
+            'start_pos': chunk.metadata.start_pos,
+            'end_pos': chunk.metadata.end_pos
+        }
+        # Убираем list_position из метаданных
         return {
             'content': chunk.content,
-            'metadata': {
-                'chunk_id': chunk.metadata.chunk_id,
-                'chunk_number': chunk.metadata.chunk_number,
-                'section_path': chunk.metadata.section_path,
-                'parent_section': chunk.metadata.parent_section,
-                'section_level': chunk.metadata.section_level,
-                'children': chunk.metadata.children,
-                'word_count': chunk.metadata.word_count,
-                'char_count': chunk.metadata.char_count,
-                'contains_lists': chunk.metadata.contains_lists,
-                'table_id': chunk.metadata.table_id,
-                'is_complete_section': chunk.metadata.is_complete_section,
-                'start_pos': chunk.metadata.start_pos,
-                'end_pos': chunk.metadata.end_pos
-            }
+            'metadata': metadata_dict
         }
 
     # helper for old logic removed; table_id в метаданных достаточно

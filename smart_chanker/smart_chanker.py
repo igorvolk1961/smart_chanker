@@ -11,22 +11,21 @@ from datetime import datetime
 
 # Импорт инструментов обработки
 try:
-    from unstructured.partition.auto import partition
-    from unstructured.chunking.title import chunk_by_title
-    UNSTRUCTURED_AVAILABLE = True
-except ImportError:
-    UNSTRUCTURED_AVAILABLE = False
-    logging.warning("Пакет unstructured не установлен")
-
-try:
     from docx2python import docx2python
     DOCX2PYTHON_AVAILABLE = True
 except ImportError:
     DOCX2PYTHON_AVAILABLE = False
     logging.warning("Пакет docx2python не установлен")
 
+from zipfile import ZipFile
+from lxml import etree
+
+WORD_NAMESPACE = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+NSMAP = {"w": WORD_NAMESPACE}
+
 # Импорт внутренних модулей
 from .numbering_restorer import NumberingRestorer
+from .table_processor import TableProcessor, ParsedDocxTable, TableExtractionError, TableConversionError
 
 
 class SmartChanker:
@@ -45,6 +44,7 @@ class SmartChanker:
         self.config = self._load_config()
         self.logger = self._setup_logger()
         self.numbering_restorer = NumberingRestorer(self.logger)
+        self.table_processor = TableProcessor()
         
         # Проверка доступности инструментов
         self._check_tools_availability()
@@ -76,6 +76,9 @@ class SmartChanker:
             "hierarchical_chunking": {
                 "enabled": False,
                 "target_level": 3,
+                "max_chunk_size": 1000,
+            },
+            "table_processing": {
                 "max_chunk_size": 1000,
             }
         }
@@ -115,13 +118,9 @@ class SmartChanker:
         """
         Проверка доступности инструментов для комбинированного подхода
         """
-        if not UNSTRUCTURED_AVAILABLE:
-            self.logger.warning("Пакет unstructured недоступен")
         if not DOCX2PYTHON_AVAILABLE:
             self.logger.warning("Пакет docx2python недоступен")
-        
-        if not UNSTRUCTURED_AVAILABLE or not DOCX2PYTHON_AVAILABLE:
-            self.logger.error("Для работы требуется оба пакета: unstructured и docx2python")
+            self.logger.error("Для работы требуется пакет docx2python")
     
     def process_folder(self, folder_path: str) -> Dict[str, Any]:
         """
@@ -218,7 +217,7 @@ class SmartChanker:
     
     def _process_with_combined_approach(self, file_path: str) -> Dict[str, Any]:
         """
-        Комбинированная обработка файла с использованием обоих инструментов
+        Комбинированная обработка файла с использованием двух инструментов: unstructured и docx2python
         
         Args:
             file_path: Путь к файлу
@@ -226,31 +225,38 @@ class SmartChanker:
         Returns:
             Результат обработки
         """
-        if not UNSTRUCTURED_AVAILABLE or not DOCX2PYTHON_AVAILABLE:
-            raise ImportError("Для комбинированного подхода требуются оба пакета: unstructured и docx2python")
+        if not DOCX2PYTHON_AVAILABLE:
+            raise ImportError("Для комбинированного подхода требуется пакет docx2python")
         
         self.logger.info(f"Используем комбинированный подход для файла: {file_path}")
         
-        # Обрабатываем с помощью unstructured - получаем элементы
-        unstructured_elements = partition(file_path)
-        
         # Обрабатываем с помощью docx2python - получаем текст с восстановлением нумерации
         docx2python_text = self._extract_text_with_docx2python(file_path)
+        docx_tables = self.table_processor.extract_docx_tables(file_path)
         
-        # Заменяем таблицы на HTML представление
-        combined_text = self._replace_tables_with_html(docx2python_text, unstructured_elements)
+        # Извлекаем информацию о таблицах из DOCX XML
+        table_info = self._extract_table_info_from_docx(file_path)
         
-        # Создаем абзацы из объединенного текста
-        combined_paragraphs = [p.strip() for p in combined_text.split('\n\n') if p.strip()]
+        # Удаляем таблицы из текста и получаем информацию о них отдельно
+        text_without_tables, tables_data = self._remove_tables_from_text(
+            docx2python_text,
+            table_info,
+            docx_tables,
+        )
+        
+        # Создаем абзацы из текста без таблиц
+        combined_paragraphs = [p.strip() for p in text_without_tables.split('\n\n') if p.strip()]
         
         return {
             "file_path": file_path,
             "tool_used": "combined_approach",
             "original_docx2python_text": docx2python_text,
-            "combined_text": combined_text,
+            "combined_text": text_without_tables,
             "paragraphs": combined_paragraphs,
             "paragraphs_count": len(combined_paragraphs),
-            "table_replacements_count": len(self._find_table_paragraphs_docx2python(docx2python_text))
+            "tables_data": tables_data,  # Информация о таблицах с позициями
+            "table_replacements_count": len(self._find_table_paragraphs_docx2python(docx2python_text)),
+            "docx_tables_count": len(docx_tables),
         }
     
     def _extract_text_with_docx2python(self, file_path: str) -> str:
@@ -755,250 +761,237 @@ class SmartChanker:
         
         return table_paragraphs
     
-    def _find_table_paragraphs_unstructured(self, elements: List) -> List[Dict]:
+    def _extract_table_info_from_docx(self, file_path: str) -> List[Dict]:
         """
-        Поиск абзацев, начинающихся со слова "Таблица" в элементах unstructured
+        Извлекает информацию о таблицах из DOCX XML (параграфы "Таблица" и их названия)
         
         Args:
-            elements: Список элементов из unstructured
+            file_path: Путь к DOCX файлу
             
         Returns:
-            Список словарей с информацией об абзацах "Таблица"
+            Список словарей с информацией о таблицах: индекс параграфа, текст, название
         """
-        table_paragraphs = []
+        table_info = []
         
-        for i, element in enumerate(elements):
-            if hasattr(element, 'text') and element.text:
-                text = element.text.strip()
-                if text.lower().startswith('таблица'):
-                    table_paragraphs.append({
-                        'index': i,
-                        'text': text,
-                        'element': element,
-                        'category': element.category
-                    })
+        try:
+            with ZipFile(file_path) as docx_zip:
+                document_bytes = docx_zip.read("word/document.xml")
+            root = etree.fromstring(document_bytes)
+        except Exception as exc:
+            self.logger.error(f"Не удалось извлечь информацию о таблицах из DOCX: {exc}")
+            return table_info
         
-        return table_paragraphs
-    
-    def _find_table_after_paragraph(self, elements: List, start_index: int, max_paragraphs: int = 3, table_paragraphs: List = None) -> Dict:
-        """
-        Поиск таблицы после абзаца "Таблица" в unstructured
+        # Находим body документа
+        body = root.find("w:body", namespaces=NSMAP)
+        if body is None:
+            return table_info
         
-        Args:
-            elements: Список элементов из unstructured
-            start_index: Индекс абзаца "Таблица"
-            max_paragraphs: Максимальное количество абзацев для поиска
+        # Получаем все элементы body в порядке их появления
+        all_elements = list(body)
+        
+        # Находим все параграфы для сопоставления индексов
+        paragraphs = root.findall(".//w:p", namespaces=NSMAP)
+        
+        # Создаем словарь для быстрого поиска позиции параграфа в body
+        para_positions = {}
+        for pos, elem in enumerate(all_elements):
+            if elem.tag == f"{{{WORD_NAMESPACE}}}p":
+                para_id = id(elem)
+                if para_id not in para_positions:
+                    para_positions[para_id] = pos
+        
+        # Находим параграфы "Таблица"
+        for para_idx, para in enumerate(paragraphs):
+            # Извлекаем текст из параграфа
+            texts = para.findall(".//w:t", namespaces=NSMAP)
+            if not texts:
+                continue
             
-        Returns:
-            Словарь с информацией о найденной таблице
-        """
-        table_found = None
-        text_after_table = ""
-        paragraph_start_after_table = None
-        
-        # Ищем таблицу в следующих элементах
-        for i in range(start_index + 1, min(start_index + max_paragraphs + 1, len(elements))):
-            element = elements[i]
+            para_text = "".join(t.text or "" for t in texts).strip()
             
-            # Останавливаем поиск, если наткнулись на следующий параграф "Таблица"
-            if table_paragraphs:
-                is_table_paragraph = False
-                for table_para in table_paragraphs:
-                    if table_para['index'] == i:
-                        is_table_paragraph = True
-                        break
+            # Проверяем, начинается ли параграф со слова "Таблица"
+            if para_text.lower().startswith('таблица'):
+                # Извлекаем название из "Таблица N. Название" или "Таблица N Название"
+                import re
+                match = re.match(r'Таблица\s+\d+[.\s]+(.+)', para_text, re.IGNORECASE)
+                table_name = match.group(1).strip() if match else ""
                 
-                if is_table_paragraph:
-                    # Если это параграф "Таблица", прерываем поиск
-                    break
-            
-            if element.category == 'Table':
-                table_found = element
+                # Ищем название в следующем параграфе, если не найдено в текущем
+                if not table_name and para_idx + 1 < len(paragraphs):
+                    next_para = paragraphs[para_idx + 1]
+                    next_texts = next_para.findall(".//w:t", namespaces=NSMAP)
+                    if next_texts:
+                        next_text = "".join(t.text or "" for t in next_texts).strip()
+                        # Проверяем, что следующий параграф не является таблицей
+                        if next_text and not next_text.lower().startswith('таблица'):
+                            # Проверяем, что следующий элемент не содержит таблицу
+                            if next_para.find(".//w:tbl", namespaces=NSMAP) is None:
+                                table_name = next_text
+                
                 # Ищем текст после таблицы
-                for j in range(i + 1, len(elements)):
-                    next_element = elements[j]
-                    if hasattr(next_element, 'text') and next_element.text.strip():
-                        text_after_table = next_element.text.strip()
-                        paragraph_start_after_table = j
-                        break
-                break
+                text_after_table = ""
+                para_id = id(para)
+                para_position = para_positions.get(para_id)
+                
+                if para_position is not None:
+                    # Ищем следующую таблицу после этого параграфа
+                    for pos in range(para_position + 1, len(all_elements)):
+                        elem = all_elements[pos]
+                        # Проверяем, является ли элемент таблицей
+                        if elem.tag == f"{{{WORD_NAMESPACE}}}tbl":
+                            # Нашли таблицу, теперь ищем первый параграф с текстом после неё
+                            for pos2 in range(pos + 1, min(pos + 20, len(all_elements))):
+                                elem2 = all_elements[pos2]
+                                # Проверяем, не является ли это следующей таблицей
+                                if elem2.tag == f"{{{WORD_NAMESPACE}}}tbl":
+                                    break
+                                # Проверяем, является ли это параграфом
+                                if elem2.tag == f"{{{WORD_NAMESPACE}}}p":
+                                    texts2 = elem2.findall(".//w:t", namespaces=NSMAP)
+                                    if texts2:
+                                        text2 = "".join(t.text or "" for t in texts2).strip()
+                                        # Проверяем, не является ли это следующим параграфом "Таблица"
+                                        if text2.lower().startswith('таблица'):
+                                            break
+                                        if text2:
+                                            text_after_table = text2
+                                            break
+                            break
+                
+                table_info.append({
+                    'index': para_idx,
+                    'text': para_text,
+                    'table_name': table_name,
+                    'text_after_table': text_after_table
+                })
         
-        return {
-            'table_found': table_found,
-            'text_after_table': text_after_table,
-            'paragraph_start_after_table': paragraph_start_after_table
-        }
-    
-    def _replace_tables_with_html(self, docx2python_text: str, unstructured_elements: List) -> str:
+        return table_info
+
+    def _remove_tables_from_text(
+        self,
+        docx2python_text: str,
+        table_info: List[Dict],
+        docx_tables: List[ParsedDocxTable],
+    ) -> tuple[str, List[Dict]]:
         """
-        Замена таблиц в тексте docx2python на HTML представление из unstructured
+        Удаляет содержимое таблиц из текста, оставляя только "Таблица N. Название"
         
         Args:
             docx2python_text: Текст из docx2python
-            unstructured_elements: Элементы из unstructured
+            table_info: Информация о таблицах из DOCX XML
+            docx_tables: Список таблиц, извлеченных напрямую из DOCX
             
         Returns:
-            Текст с замененными таблицами
+            Кортеж: (текст без содержимого таблиц, список данных о таблицах с позициями)
         """
         # Разбиваем текст на параграфы один раз
         docx_paragraphs = docx2python_text.split('\n')
         
-        # Находим абзацы "Таблица" в обоих источниках
+        # Находим абзацы "Таблица" в тексте docx2python
         docx_table_paragraphs = self._find_table_paragraphs_docx2python(docx_paragraphs)
-        unstructured_table_paragraphs = self._find_table_paragraphs_unstructured(unstructured_elements)
         
-        if len(docx_table_paragraphs) != len(unstructured_table_paragraphs):
+        if len(docx_table_paragraphs) != len(table_info):
             self.logger.warning(f"Количество абзацев 'Таблица' не совпадает: "
                               f"docx2python={len(docx_table_paragraphs)}, "
-                              f"unstructured={len(unstructured_table_paragraphs)}")
-        
-        # Сопоставляем по порядку и выполняем замены
-        for i, (docx_para, unstructured_para) in enumerate(zip(docx_table_paragraphs, unstructured_table_paragraphs)):
-            # Находим таблицу после абзаца в unstructured
-            table_data = self._find_table_after_paragraph(
-                unstructured_elements, 
-                unstructured_para['index'],
-                self.config.get("table_processing", {}).get("max_paragraphs_after_table", 3),
-                unstructured_table_paragraphs
+                              f"docx_xml={len(table_info)}")
+        if docx_tables and len(docx_tables) != len(docx_table_paragraphs):
+            self.logger.warning(
+                f"Число таблиц в DOCX ({len(docx_tables)}) не совпадает с числом ссылок 'Таблица' ({len(docx_table_paragraphs)})"
             )
+        
+        # Собираем информацию о таблицах и удаляем содержимое таблиц
+        tables_data: List[Dict] = []
+        indices_to_remove = set()
+        
+        # Обрабатываем таблицы в обратном порядке, чтобы индексы не сдвигались
+        for i in range(len(docx_table_paragraphs) - 1, -1, -1):
+            docx_para = docx_table_paragraphs[i]
             
-            if table_data['table_found']:
-                # Создаем JSON таблицу
-                json_table = self._convert_table_to_json(table_data['table_found'])
-                
-                # Определяем конец заменяемого участка
-                start_index = docx_para['index']
-                
-                # Если есть текст после таблицы, ищем соответствующий параграф в docx
-                if table_data['text_after_table']:
-                    end_index = start_index + 1  # По умолчанию заменяем только параграф "Таблица"
+            if i >= len(docx_tables):
+                raise ValueError(f"Таблица {i+1} не найдена в DOCX файле")
+            
+            docx_table = docx_tables[i]
+            
+            # Получаем название таблицы из table_info, если доступно
+            table_name = ""
+            if i < len(table_info):
+                table_name = table_info[i].get('table_name', '')
+            
+            # Если название не найдено в table_info, пытаемся извлечь из параграфа
+            para_text = docx_para.get('text', '')
+            import re
+            if not table_name:
+                match = re.match(r'Таблица\s+\d+[.\s]+(.+)', para_text, re.IGNORECASE)
+                if match:
+                    table_name = match.group(1).strip()
+            
+            if not table_name:
+                raise ValueError(f"Название таблицы {i+1} не найдено")
+            
+            # Определяем позицию таблицы в исходном тексте
+            start_index = docx_para['index']
+            
+            # Если есть текст после таблицы, ищем соответствующий параграф в docx
+            text_after_table = ""
+            if i < len(table_info):
+                text_after_table = table_info[i].get('text_after_table', '')
+            
+            # Определяем end_index - конец содержимого таблицы
+            end_index = start_index + 1  # По умолчанию удаляем только параграф "Таблица"
+            
+            if text_after_table:
+                # Ищем текст после таблицы
+                for j in range(start_index + 1, len(docx_paragraphs)):
+                    if text_after_table in docx_paragraphs[j]:
+                        end_index = j
+                        break
+                # Если не нашли text_after_table, ищем следующую таблицу
+                if end_index == start_index + 1:
+                    # Ищем следующий параграф "Таблица"
                     for j in range(start_index + 1, len(docx_paragraphs)):
-                        if table_data['text_after_table'] in docx_paragraphs[j]:
+                        if docx_paragraphs[j].strip().lower().startswith('таблица'):
                             end_index = j
                             break
-                else:
-                    # Если текста после таблицы нет - заменяем все до конца файла
-                    end_index = len(docx_paragraphs)
-                
-                # Заменяем все параграфы между start_index и end_index на JSON таблицу
-                docx_paragraphs[start_index + 1:end_index] = [json_table]
-                
-                # Обновляем индексы в оставшихся docx_table_paragraphs
-                removed_count = end_index - start_index - 2  # Количество удаленных параграфов
-                for j in range(i + 1, len(docx_table_paragraphs)):
-                    docx_table_paragraphs[j]['index'] -= removed_count - 1 # один параграф добавлен
-        
-        return '\n'.join(docx_paragraphs)
-    
-    def _convert_table_to_json(self, table_element) -> str:
-        """
-        Конвертация элемента таблицы в JSON формат для лучшего понимания LLM
-        
-        Args:
-            table_element: Элемент таблицы из unstructured
-            
-        Returns:
-            JSON представление таблицы
-        """
-        import json
-        
-        if hasattr(table_element, 'metadata') and hasattr(table_element.metadata, 'text_as_html'):
-            # Парсим HTML и конвертируем в JSON
-            return self._html_to_json(table_element.metadata.text_as_html)
-        else:
-            # Создаем простую JSON структуру
-            table_data = {
-                "type": "table",
-                "content": table_element.text,
-                "structure": {
-                    "headers": [],
-                    "rows": [{"cells": [{"text": table_element.text}]}]
-                }
-            }
-            json_str = json.dumps(table_data, ensure_ascii=False, indent=2)
-            return f"```json\n{json_str}\n```"
-    
-    def _html_to_json(self, html_content: str) -> str:
-        """
-        Конвертация HTML таблицы в JSON структуру
-        
-        Args:
-            html_content: HTML содержимое таблицы
-            
-        Returns:
-            JSON строка с описанием таблицы
-        """
-        import json
-        from bs4 import BeautifulSoup
-        
-        try:
-            soup = BeautifulSoup(html_content, 'html.parser')
-            table = soup.find('table')
-            
-            if not table:
-                return json.dumps({"type": "table", "error": "Не удалось найти таблицу"}, ensure_ascii=False)
-            
-            # Извлекаем заголовки
-            headers = []
-            thead = table.find('thead')
-            if thead:
-                for th in thead.find_all(['th', 'td']):
-                    colspan = int(th.get('colspan', 1))
-                    header = {"text": th.get_text(strip=True)}
-                    if colspan > 1:
-                        header["colspan"] = colspan
-                    headers.append(header)
+                    # Если следующей таблицы нет, удаляем до конца
+                    if end_index == start_index + 1:
+                        end_index = len(docx_paragraphs)
             else:
-                # Если нет thead, берем первую строку
-                first_row = table.find('tr')
-                if first_row:
-                    for cell in first_row.find_all(['th', 'td']):
-                        colspan = int(cell.get('colspan', 1))
-                        header = {"text": cell.get_text(strip=True)}
-                        if colspan > 1:
-                            header["colspan"] = colspan
-                        headers.append(header)
+                # Если текста после таблицы нет - ищем следующую таблицу или конец файла
+                for j in range(start_index + 1, len(docx_paragraphs)):
+                    if docx_paragraphs[j].strip().lower().startswith('таблица'):
+                        end_index = j
+                        break
+                # Если следующей таблицы нет, удаляем до конца
+                if end_index == start_index + 1:
+                    end_index = len(docx_paragraphs)
             
-            # Извлекаем строки данных
-            rows = []
-            tbody = table.find('tbody') or table
-            for tr in tbody.find_all('tr'):
-                if tr == first_row and not thead:
-                    continue  # Пропускаем первую строку, если она уже в заголовках
-                
-                cells = []
-                for cell in tr.find_all(['td', 'th']):
-                    colspan = int(cell.get('colspan', 1))
-                    rowspan = int(cell.get('rowspan', 1))
-                    cell_data = {"text": cell.get_text(strip=True)}
-                    if colspan > 1:
-                        cell_data["colspan"] = colspan
-                    if rowspan > 1:
-                        cell_data["rowspan"] = rowspan
-                    cells.append(cell_data)
-                
-                if cells:  # Добавляем только непустые строки
-                    rows.append({"cells": cells})
+            # Вычисляем позицию в исходном тексте (до удаления)
+            text_before = '\n'.join(docx_paragraphs[:start_index])
+            position_in_text = len(text_before)
             
-            table_data = {
-                "type": "table",
-                "structure": {
-                    "headers": headers,
-                    "rows": rows
-                }
-            }
+            # Сохраняем информацию о таблице
+            tables_data.append({
+                'table_name': table_name,
+                'table_index': i,
+                'position_in_text': position_in_text,
+                'start_paragraph_index': start_index,
+                'end_paragraph_index': end_index,
+                'docx_table': docx_table,
+                'table_paragraph_text': para_text,  # Сохраняем текст параграфа "Таблица N. Название"
+            })
             
-            json_str = json.dumps(table_data, ensure_ascii=False, indent=2)
-            return f"```json\n{json_str}\n```"
-            
-        except Exception as e:
-            # В случае ошибки возвращаем простую структуру
-            json_str = json.dumps({
-                "type": "table",
-                "error": f"Ошибка парсинга: {str(e)}",
-                "content": html_content
-            }, ensure_ascii=False, indent=2)
-            return f"```json\n{json_str}\n```"
+            # Помечаем параграфы для удаления (включая сам параграф "Таблица")
+            # Удаляем полностью параграф "Таблица N" и всё содержимое таблицы
+            for idx in range(start_index, end_index):
+                indices_to_remove.add(idx)
+        
+        # Удаляем помеченные параграфы (параграфы "Таблица" и их содержимое)
+        text_without_table_content = '\n'.join(
+            para for idx, para in enumerate(docx_paragraphs) 
+            if idx not in indices_to_remove
+        )
+        
+        return text_without_table_content, tables_data
     
     # ===== ИЕРАРХИЧЕСКИЙ ЧАНКИНГ =====
     
@@ -1167,16 +1160,50 @@ class SmartChanker:
             except Exception as e:
                 self.logger.warning(f"Не удалось обработать оглавление: {e}")
 
+        # 2.6) Создаем подразделы для таблиц в иерархии
+        tables_data = combined_result.get("tables_data", [])
+        if tables_data:
+            try:
+                process_result = self._create_table_subsections(
+                    tables_data,
+                    extracted_text,  # Исходный текст для определения позиций
+                    process_result,
+                )
+            except Exception as e:
+                self.logger.warning(f"Не удалось создать подразделы для таблиц: {e}")
+
+        # 2.7) Обработка таблиц отдельно с созданием чанков
+        table_chunks = []
+        if tables_data:
+            try:
+                table_chunks = self._process_tables_with_sections(
+                    tables_data,
+                    process_result.get("sections", []),
+                    max_chunk_size,
+                )
+            except Exception as e:
+                self.logger.warning(f"Не удалось обработать таблицы: {e}")
+
+        # 2.8) Обновляем чанки разделов, добавляя в children идентификаторы чанков таблиц
+        if table_chunks:
+            process_result["chunks"] = self._update_chunks_with_table_children(
+                process_result.get("chunks", []),
+                table_chunks,
+                process_result,
+            )
+
         # 3) Сформировать итоговый результат
         return {
             "file_path": input_path,
             "sections": process_result.get("sections", []),
             "chunks": process_result.get("chunks", []),
             "toc_chunks": toc_chunks,  # Чанки оглавления
+            "table_chunks": table_chunks,  # Чанки таблиц
             "metadata": {
                 **{k: v for k, v in process_result.get("metadata", {}).items()},
                 "created_at": datetime.utcnow().isoformat() + "Z",
                 "has_toc": bool(toc_text),
+                "tables_count": len(tables_data),
             },
         }
 
@@ -1235,3 +1262,458 @@ class SmartChanker:
         except Exception as e:
             self.logger.error(f"Ошибка при извлечении list_position: {e}")
             return []
+    
+    def _create_table_subsections(
+        self,
+        tables_data: List[Dict],
+        original_text: str,
+        process_result: Dict,
+    ) -> Dict:
+        """
+        Создает подразделы для таблиц в иерархии
+        
+        Args:
+            tables_data: Данные о таблицах с позициями
+            original_text: Исходный текст для определения родительских разделов
+            process_result: Результат обработки с разделами
+            
+        Returns:
+            Обновленный process_result с подразделами таблиц
+        """
+        from .hierarchy_parser import HierarchyParser, SectionNode
+        from typing import Optional
+        
+        # Парсим иерархию для получения структуры разделов
+        parser = HierarchyParser()
+        section_nodes = parser.parse_hierarchy(original_text)
+        
+        # Строим карту позиций разделов
+        section_positions = self._build_section_position_map(original_text, process_result.get("sections", []))
+        
+        # Создаем подразделы для таблиц
+        for table_data in tables_data:
+            table_name = table_data['table_name']
+            position = table_data['position_in_text']
+            table_index = table_data['table_index']
+            table_paragraph_text = table_data.get('table_paragraph_text', f'Таблица {table_index + 1}. {table_name}')
+            
+            # Определяем родительский раздел для таблицы по позиции
+            section_info = self._find_section_for_position(position, section_positions, process_result.get("sections", []))
+            
+            # Находим соответствующий SectionNode
+            parent_node = self._find_section_node_by_path(section_info.get('section_path', []), section_nodes)
+            
+            if parent_node:
+                # Создаем подраздел для таблицы
+                table_section_number = f"{parent_node.number}.T{table_index + 1}"
+                table_section = SectionNode(
+                    number=table_section_number,
+                    title=table_paragraph_text,
+                    level=parent_node.level + 1,
+                    content=table_paragraph_text,  # Только "Таблица N. Название"
+                    parent=parent_node
+                )
+                parent_node.children.append(table_section)
+                parent_node.tables.append(table_section_number)
+                section_nodes.append(table_section)
+                
+                # Сохраняем номер подраздела в данных таблицы
+                table_data['table_subsection_number'] = table_section_number
+        
+        # Обновляем sections в process_result
+        from .hierarchical_chunker import HierarchicalChunker
+        chunker = HierarchicalChunker()
+        process_result["sections"] = chunker._serialize_sections(section_nodes)
+        
+        # Перегенерируем чанки, чтобы включить подразделы таблиц
+        hconf = self.config.get("hierarchical_chunking", {})
+        target_level = hconf.get("target_level", 3)
+        max_chunk_size = hconf.get("max_chunk_size", 1000)
+        
+        from .semantic_chunker import SemanticChunker
+        semantic_chunker = SemanticChunker(max_chunk_size=max_chunk_size)
+        updated_chunks = semantic_chunker.generate_chunks(section_nodes, target_level=target_level)
+        
+        # Сериализуем обновленные чанки
+        process_result["chunks"] = chunker._serialize_chunks(updated_chunks)
+        
+        return process_result
+    
+    def _find_section_node_by_path(
+        self,
+        section_path: List[str],
+        section_nodes: List,
+    ):
+        """
+        Находит SectionNode по пути из заголовков
+        
+        Args:
+            section_path: Путь из заголовков разделов
+            section_nodes: Список разделов
+            
+        Returns:
+            SectionNode или None
+        """
+        from .hierarchy_parser import SectionNode
+        from typing import Optional
+        
+        if not section_path:
+            return None
+        
+        # Ищем раздел по заголовку
+        for node in section_nodes:
+            if node.title == section_path[-1]:
+                # Проверяем путь
+                current = node
+                path_idx = len(section_path) - 1
+                while current and path_idx >= 0:
+                    if current.title != section_path[path_idx]:
+                        break
+                    current = current.parent
+                    path_idx -= 1
+                
+                if path_idx < 0:
+                    return node
+        
+        return None
+    
+    def _process_tables_with_sections(
+        self,
+        tables_data: List[Dict],
+        sections: List[Dict],
+        max_chunk_size: int,
+    ) -> List[Dict]:
+        """
+        Обрабатывает таблицы и создает чанки с метаданными
+        
+        Args:
+            tables_data: Данные о таблицах с позициями и номерами подразделов
+            sections: Список разделов из иерархического парсинга
+            max_chunk_size: Максимальный размер чанка
+            
+        Returns:
+            Список чанков таблиц с метаданными
+        """
+        import uuid
+        from .hierarchy_parser import ChunkMetadata
+        
+        table_chunks = []
+        
+        for table_data in tables_data:
+            table_name = table_data['table_name']
+            docx_table = table_data['docx_table']
+            table_index = table_data['table_index']
+            table_subsection_number = table_data.get('table_subsection_number', f'Table_{table_index + 1}')
+            
+            # Чанкуем таблицу
+            table_chunk_contents = self.table_processor.docx_table_to_chunks(
+                docx_table, table_name, max_chunk_size
+            )
+            
+            # Создаем чанки с метаданными
+            for chunk_idx, chunk_content in enumerate(table_chunk_contents):
+                chunk_id = str(uuid.uuid4())
+                
+                # Создаем метаданные для чанка таблицы
+                metadata = ChunkMetadata(
+                    chunk_id=chunk_id,
+                    chunk_number=chunk_idx + 1,
+                    section_path=[],  # Убираем section_path
+                    parent_section=table_subsection_number,  # Используем номер подраздела
+                    section_level=0,
+                    children=[],
+                    word_count=len(chunk_content.split()),
+                    char_count=len(chunk_content),
+                    contains_lists=False,
+                    is_complete_section=False,
+                    start_pos=0,
+                    end_pos=len(chunk_content),
+                    table_id=f"Table_{table_index + 1}",
+                )
+                
+                table_chunks.append({
+                    'content': chunk_content,
+                    'metadata': {
+                        'chunk_id': metadata.chunk_id,
+                        'chunk_number': metadata.chunk_number,
+                        'parent_section': metadata.parent_section,
+                        'section_level': metadata.section_level,
+                        'children': metadata.children,
+                        'word_count': metadata.word_count,
+                        'char_count': metadata.char_count,
+                        'contains_lists': metadata.contains_lists,
+                        'table_id': metadata.table_id,
+                        'is_complete_section': metadata.is_complete_section,
+                        'start_pos': metadata.start_pos,
+                        'end_pos': metadata.end_pos,
+                        'table_name': table_name,
+                        'table_index': table_index,
+                    }
+                })
+        
+        return table_chunks
+    
+    def _build_section_position_map(
+        self,
+        text: str,
+        sections: List[Dict],
+    ) -> List[Dict]:
+        """
+        Строит карту позиций разделов в тексте
+        
+        Args:
+            text: Исходный текст
+            sections: Список разделов
+            
+        Returns:
+            Список словарей с информацией о позициях разделов
+        """
+        from .hierarchy_parser import HierarchyParser
+        
+        # Парсим иерархию для получения полной структуры с позициями
+        parser = HierarchyParser()
+        section_nodes = parser.parse_hierarchy(text)
+        
+        # Строим карту позиций
+        position_map = []
+        current_pos = 0
+        
+        def process_section(node, parent_path: List[str] = []):
+            nonlocal current_pos
+            
+            # Находим позицию начала раздела в тексте
+            section_path = parent_path + [node.number]
+            
+            # Ищем заголовок раздела в тексте
+            section_start = text.find(node.title, current_pos)
+            if section_start == -1:
+                # Если не нашли по заголовку, используем текущую позицию
+                section_start = current_pos
+            else:
+                current_pos = section_start
+            
+            position_map.append({
+                'section_number': node.number,
+                'section_title': node.title,
+                'section_level': node.level,
+                'section_path': section_path,
+                'parent_section': node.parent.number if node.parent else 'Root',
+                'children': [child.number for child in node.children],
+                'start_position': section_start,
+                'content': node.content,
+            })
+            
+            # Обрабатываем дочерние разделы
+            for child in node.children:
+                process_section(child, section_path)
+        
+        # Обрабатываем все корневые разделы
+        for node in section_nodes:
+            process_section(node)
+        
+        return position_map
+    
+    def _find_section_for_position(
+        self,
+        position: int,
+        section_positions: List[Dict],
+        sections: List[Dict],
+    ) -> Dict:
+        """
+        Находит раздел для заданной позиции в тексте
+        
+        Args:
+            position: Позиция в тексте
+            section_positions: Карта позиций разделов
+            sections: Список разделов
+            
+        Returns:
+            Информация о разделе
+        """
+        # Находим самый глубокий раздел, который содержит эту позицию
+        best_match = None
+        best_level = -1
+        
+        for section_pos in section_positions:
+            start = section_pos['start_position']
+            content = section_pos.get('content', '')
+            end = start + len(content) if content else start + 1000  # Примерная оценка
+            
+            if start <= position <= end:
+                if section_pos['section_level'] > best_level:
+                    best_level = section_pos['section_level']
+                    best_match = section_pos
+        
+        if best_match:
+            # Строим section_path из заголовков разделов, как в чанках
+            section_path = self._build_section_path_from_sections(
+                best_match['section_path'], sections
+            )
+            
+            # Находим parent_section из заголовка, а не из номера
+            parent_section_title = self._find_section_title_by_number(
+                best_match['parent_section'], sections
+            )
+            
+            return {
+                'section_path': section_path,
+                'parent_section': parent_section_title if parent_section_title else 'Root',
+                'section_level': best_match['section_level'],
+                'children': best_match['children'],
+            }
+        
+        # Если не нашли, возвращаем корневой раздел
+        return {
+            'section_path': ['Root'],
+            'parent_section': 'Root',
+            'section_level': 0,
+            'children': [],
+        }
+    
+    def _build_section_path_from_sections(
+        self,
+        section_number_path: List[str],
+        sections: List[Dict],
+    ) -> List[str]:
+        """
+        Строит section_path из заголовков разделов по пути из номеров
+        
+        Args:
+            section_number_path: Путь из номеров разделов (например, ["0", "1.1"])
+            sections: Список разделов
+            
+        Returns:
+            Путь из заголовков разделов (например, ["Пример сложной таблицы", "Подраздел"])
+        """
+        section_path = []
+        
+        # Создаем словарь номер -> раздел для быстрого поиска
+        sections_by_number = {s['number']: s for s in sections}
+        
+        # Строим путь из заголовков
+        for number in section_number_path:
+            if number in sections_by_number:
+                section_path.append(sections_by_number[number]['title'])
+            else:
+                # Если не нашли, используем номер
+                section_path.append(number)
+        
+        return section_path if section_path else ['Root']
+    
+    def _find_section_title_by_number(
+        self,
+        section_number: str,
+        sections: List[Dict],
+    ) -> Optional[str]:
+        """
+        Находит заголовок раздела по его номеру
+        
+        Args:
+            section_number: Номер раздела
+            sections: Список разделов
+            
+        Returns:
+            Заголовок раздела или None
+        """
+        for section in sections:
+            if section['number'] == section_number:
+                return section['title']
+        return None
+    
+    def _update_chunks_with_table_children(
+        self,
+        section_chunks: List[Dict],
+        table_chunks: List[Dict],
+        process_result: Dict,
+    ) -> List[Dict]:
+        """
+        Обновляет чанки разделов, добавляя в children идентификаторы чанков таблиц
+        
+        Args:
+            section_chunks: Чанки разделов
+            table_chunks: Чанки таблиц
+            
+        Returns:
+            Обновленные чанки разделов
+        """
+        # Группируем чанки таблиц по parent_section (номеру подраздела таблицы)
+        table_chunks_by_subsection: Dict[str, List[str]] = {}
+        
+        for table_chunk in table_chunks:
+            table_parent_section = table_chunk['metadata'].get('parent_section', '')
+            table_chunk_id = table_chunk['metadata']['chunk_id']
+            
+            if table_parent_section:
+                if table_parent_section not in table_chunks_by_subsection:
+                    table_chunks_by_subsection[table_parent_section] = []
+                table_chunks_by_subsection[table_parent_section].append(table_chunk_id)
+        
+        # Обновляем чанки разделов (включая подразделы таблиц)
+        # Сначала находим номера разделов для каждого чанка
+        chunk_numbers_by_chunk_id = {}
+        for chunk in section_chunks:
+            chunk_id = chunk['metadata'].get('chunk_id', '')
+            # Получаем номер раздела из section_path или из parent_section для подразделов таблиц
+            section_path = chunk['metadata'].get('section_path', [])
+            if section_path:
+                # Находим номер раздела из sections
+                chunk_number = self._find_section_number_by_path(section_path, process_result.get("sections", []))
+                if chunk_number:
+                    chunk_numbers_by_chunk_id[chunk_id] = chunk_number
+        
+        updated_chunks = []
+        for chunk in section_chunks:
+            chunk_id = chunk['metadata'].get('chunk_id', '')
+            chunk_number = chunk_numbers_by_chunk_id.get(chunk_id, '')
+            
+            # Получаем идентификаторы чанков таблиц для этого раздела/подраздела
+            table_chunk_ids = []
+            # Если это подраздел таблицы (номер содержит .T), добавляем его чанки
+            if '.T' in chunk_number:
+                table_chunk_ids = table_chunks_by_subsection.get(chunk_number, [])
+            # Если это обычный раздел, ищем чанки таблиц по номеру раздела
+            elif chunk_number:
+                # Ищем подразделы таблиц, которые являются детьми этого раздела
+                for subsection_number, chunk_ids in table_chunks_by_subsection.items():
+                    # Проверяем, является ли подраздел таблицы дочерним для этого раздела
+                    if subsection_number.startswith(chunk_number + '.'):
+                        table_chunk_ids.extend(chunk_ids)
+            
+            # Обновляем children, добавляя идентификаторы чанков таблиц
+            original_children = chunk['metadata'].get('children', [])
+            updated_children = original_children + table_chunk_ids
+            
+            # Создаем обновленный чанк
+            updated_chunk = chunk.copy()
+            updated_chunk['metadata'] = chunk['metadata'].copy()
+            updated_chunk['metadata']['children'] = updated_children
+            
+            updated_chunks.append(updated_chunk)
+        
+        return updated_chunks
+    
+    def _find_section_number_by_path(
+        self,
+        section_path: List[str],
+        sections: List[Dict],
+    ) -> Optional[str]:
+        """
+        Находит номер раздела по пути из заголовков
+        
+        Args:
+            section_path: Путь из заголовков разделов
+            sections: Список разделов
+            
+        Returns:
+            Номер раздела или None
+        """
+        if not section_path:
+            return None
+        
+        # Ищем раздел по последнему заголовку в пути
+        last_title = section_path[-1]
+        for section in sections:
+            if section.get('title') == last_title:
+                return section.get('number', '')
+        
+        return None
