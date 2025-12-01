@@ -1,6 +1,7 @@
 {
   "table_processing": {
-    "max_paragraphs_after_table": 3
+    "max_paragraphs_after_table": 3,
+    "max_table_name_paragraphs": 5
   },
   "output": {
     "save_docx2python_text": false,
