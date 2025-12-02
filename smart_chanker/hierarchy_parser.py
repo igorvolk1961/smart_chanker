@@ -5,7 +5,18 @@
 import re
 import uuid
 from typing import List, Dict, Optional, Tuple, Any
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+
+@dataclass
+class ParagraphWithIndex:
+    """Параграф с индексом и метаданными"""
+    index: int  # Индекс в исходном списке параграфов
+    text: str  # Текст параграфа
+    restored_text: Optional[str] = None  # Текст с восстановленной нумерацией
+    list_position: Optional[tuple] = None  # list_position из docx2python
+    is_table_paragraph: bool = False  # Является ли параграф частью таблицы
+    table_index: Optional[int] = None  # Индекс таблицы, если это параграф таблицы
 
 
 @dataclass
@@ -20,6 +31,7 @@ class SectionNode:
     chunks: List[str] = None  # список ID чанков в разделе
     tables: List[str] = None  # глобальные номера таблиц, встретившихся в разделе
     list_position: Optional[tuple] = None  # list_position из docx2python
+    paragraph_indices: Optional[tuple] = None  # (first_index, last_index) - диапазон индексов параграфов раздела
     
     def __post_init__(self):
         if self.children is None:
@@ -28,6 +40,7 @@ class SectionNode:
             self.chunks = []
         if self.tables is None:
             self.tables = []
+        # paragraph_indices остается None если не установлен
 
 
 @dataclass
@@ -43,10 +56,7 @@ class ChunkMetadata:
     """Метаданные чанка"""
     chunk_id: str
     chunk_number: int  # порядковый номер чанка в разделе
-    section_path: List[str]
-    parent_section: str
-    section_level: int
-    children: List[str]
+    section_number: str  # номер раздела (для получения информации из sections)
     word_count: int
     char_count: int
     contains_lists: bool
@@ -55,6 +65,11 @@ class ChunkMetadata:
     end_pos: int    # позиция конца чанка в разделе
     table_id: Optional[str] = None
     list_position: Optional[tuple] = None  # list_position из docx2python
+    paragraph_indices: List[int] = None  # Индексы параграфов, из которых состоит чанк
+    
+    def __post_init__(self):
+        if self.paragraph_indices is None:
+            self.paragraph_indices = []
 
 
 class HierarchyParser:
@@ -86,6 +101,58 @@ class HierarchyParser:
             Плоский список всех разделов с установленными parent связями
         """
         lines = text.split('\n')
+        return self._parse_hierarchy_from_lines(lines)
+    
+    def parse_hierarchy_from_paragraphs(
+        self, 
+        paragraphs: List[Dict], 
+        list_positions: Optional[List[tuple]] = None
+    ) -> List[SectionNode]:
+        """
+        Парсит иерархию из списка параграфов с индексами
+        
+        Args:
+            paragraphs: Список словарей с ключами:
+                - 'index': int - индекс параграфа
+                - 'text': str - текст параграфа
+                - 'restored_text': Optional[str] - текст с восстановленной нумерацией
+                - 'list_position': Optional[tuple] - list_position из docx2python
+            list_positions: Устаревший параметр, не используется
+            
+        Returns:
+            Плоский список всех разделов с установленными parent связями и paragraph_indices
+        """
+        # Преобразуем параграфы в строки для парсинга
+        lines = []
+        paragraph_index_map = {}  # индекс строки -> индекс параграфа
+        
+        for i, para in enumerate(paragraphs):
+            # Используем restored_text если есть, иначе text
+            para_text = para.get('restored_text') or para.get('text', '')
+            if para_text.strip():
+                line_index = len(lines)
+                lines.append(para_text)
+                # Используем позицию в списке как индекс параграфа
+                paragraph_index_map[line_index] = i
+        
+        # Парсим иерархию из строк
+        sections = self._parse_hierarchy_from_lines(lines)
+        
+        # Добавляем индексы параграфов к разделам
+        self._add_paragraph_indices_to_sections(sections, lines, paragraph_index_map)
+        
+        return sections
+    
+    def _parse_hierarchy_from_lines(self, lines: List[str]) -> List[SectionNode]:
+        """
+        Внутренний метод для парсинга иерархии из списка строк
+        
+        Args:
+            lines: Список строк для парсинга
+            
+        Returns:
+            Плоский список всех разделов с установленными parent связями
+        """
         self.sections = []
         self.flat_lists = []
         
@@ -284,6 +351,43 @@ class HierarchyParser:
             self._finalize_flat_list(current_flat_list)
         
         return self.sections
+    
+    def _add_paragraph_indices_to_sections(
+        self, 
+        sections: List[SectionNode], 
+        lines: List[str], 
+        paragraph_index_map: Dict[int, int]
+    ):
+        """
+        Добавляет индексы параграфов к разделам на основе их содержимого
+        
+        Args:
+            sections: Список разделов
+            lines: Список строк (параграфов)
+            paragraph_index_map: Словарь: индекс строки -> индекс параграфа
+        """
+        # Для каждого раздела находим строки, которые входят в его content
+        for section in sections:
+            section_lines = section.content.split('\n')
+            section_indices = []
+            
+            # Ищем индексы строк, которые входят в content раздела
+            for line_idx, line in enumerate(lines):
+                if line in section_lines or line.strip() in [sl.strip() for sl in section_lines]:
+                    if line_idx in paragraph_index_map:
+                        para_idx = paragraph_index_map[line_idx]
+                        if para_idx not in section_indices:
+                            section_indices.append(para_idx)
+            
+            # Сохраняем только первый и последний индекс
+            if section_indices:
+                section.paragraph_indices = (min(section_indices), max(section_indices))
+            else:
+                section.paragraph_indices = None
+            
+            # Рекурсивно обрабатываем дочерние разделы
+            if section.children:
+                self._add_paragraph_indices_to_sections(section.children, lines, paragraph_index_map)
     
     def _classify_element(self, text: str, context: Dict) -> Tuple[str, Optional[str]]:
         """

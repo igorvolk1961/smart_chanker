@@ -230,28 +230,21 @@ class SemanticChunker:
         Returns:
             Метаданные чанка
         """
-        # Строим путь к разделу
-        section_path = self._build_section_path(section)
-        
-        # Получаем информацию о родительском разделе
-        parent_section = section.parent.number if section.parent else "Root"
-        
-        # Получаем информацию о дочерних разделах
-        children = [child.number for child in section.children]
-        
         # Анализируем содержимое на наличие списков
         contains_lists = self._analyze_content_for_lists(section.content)
         
         # table_id только для табличных разделов (*.T{N})
         table_id: Optional[str] = section.number if self._is_table_section(section) else None
         
+        # Вычисляем индексы параграфов для чанка на основе позиций
+        paragraph_indices = self._get_paragraph_indices_for_chunk(
+            section, start_pos, end_pos
+        )
+        
         return ChunkMetadata(
             chunk_id=chunk_id,
             chunk_number=chunk_number,
-            section_path=section_path,
-            parent_section=parent_section,
-            section_level=section.level,
-            children=children,
+            section_number=section.number,  # Только номер раздела, остальное из sections
             word_count=len(section.content.split()),
             char_count=len(section.content),
             contains_lists=contains_lists,
@@ -259,8 +252,39 @@ class SemanticChunker:
             is_complete_section=is_complete,
             start_pos=start_pos,
             end_pos=end_pos,
-            list_position=None  # Убираем list_position
+            list_position=None,  # Убираем list_position
+            paragraph_indices=paragraph_indices
         )
+    
+    def _get_paragraph_indices_for_chunk(
+        self, 
+        section: SectionNode, 
+        start_pos: int, 
+        end_pos: int
+    ) -> List[int]:
+        """
+        Вычисляет индексы параграфов для чанка на основе позиций в разделе
+        
+        Args:
+            section: Раздел
+            start_pos: Позиция начала чанка в разделе
+            end_pos: Позиция конца чанка в разделе
+            
+        Returns:
+            Список индексов параграфов
+        """
+        # Если у раздела есть paragraph_indices, используем их
+        if hasattr(section, 'paragraph_indices') and section.paragraph_indices:
+            first_idx, last_idx = section.paragraph_indices
+            # Для полного раздела возвращаем все индексы в диапазоне
+            if start_pos == 0 and end_pos >= len(section.content):
+                return list(range(first_idx, last_idx + 1))
+            
+            # Для частичного чанка возвращаем весь диапазон раздела
+            # (можно улучшить, если нужно более точное определение)
+            return list(range(first_idx, last_idx + 1))
+        
+        return []
     
     def _build_section_path(self, section: SectionNode) -> List[str]:
         """

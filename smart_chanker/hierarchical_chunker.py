@@ -97,6 +97,8 @@ class HierarchicalChunker:
             'parent_number': section.parent.number if section.parent else None,
             'children': [child.number for child in section.children],
             'chunks': section.chunks,
+            'tables': section.tables if hasattr(section, 'tables') and section.tables else [],
+            'paragraph_indices': section.paragraph_indices if hasattr(section, 'paragraph_indices') and section.paragraph_indices else None,
         }
     
     def _serialize_chunks(self, chunks: List[Chunk]) -> List[Dict[str, Any]]:
@@ -134,10 +136,7 @@ class HierarchicalChunker:
         metadata_dict = {
             'chunk_id': chunk.metadata.chunk_id,
             'chunk_number': chunk.metadata.chunk_number,
-            'section_path': chunk.metadata.section_path,
-            'parent_section': chunk.metadata.parent_section,
-            'section_level': chunk.metadata.section_level,
-            'children': chunk.metadata.children,
+            'section_number': chunk.metadata.section_number,
             'word_count': chunk.metadata.word_count,
             'char_count': chunk.metadata.char_count,
             'contains_lists': chunk.metadata.contains_lists,

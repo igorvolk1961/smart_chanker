@@ -5,7 +5,7 @@
   },
   "output": {
     "save_docx2python_text": false,
-    "save_list_positions": false
+    "save_list_positions": true
   },
   "hierarchical_chunking": {
     "enabled": true,
