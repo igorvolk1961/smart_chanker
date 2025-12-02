@@ -608,7 +608,7 @@ class SmartChanker:
             # Добавляем параграф только если он не в таблице
             if not is_in_table:
                 paragraphs_with_indices.append({
-                    'text': para_text.strip(),
+                    'text': para_text,
                     'list_position': list_position,
                 })
                 paragraph_index += 1
