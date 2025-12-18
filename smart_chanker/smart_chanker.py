@@ -1392,9 +1392,10 @@ class SmartChanker:
                     continue
             
             # Находим раздел по индексу параграфа перед таблицей
-            # Теперь paragraphs содержит все параграфы (включая названия таблиц),
-            # поэтому paragraph_index_before работает одинаково для извлечения названия и поиска раздела
-            parent_node = self._find_section_by_paragraph_index(section_nodes, paragraph_index_before_original)
+            # Для проверки раздела из номера параграфа таблицы нужно вычесть 1
+            search_paragraph_index = paragraph_index_before_original - 1
+            self.logger.debug(f"Поиск раздела для таблицы {table_idx + 1}: paragraph_index_before_original={paragraph_index_before_original}, search_paragraph_index={search_paragraph_index}")
+            parent_node = self._find_section_by_paragraph_index(section_nodes, search_paragraph_index)
             
             # Сохраняем table_name в данных таблицы всегда (даже если раздел не найден)
             table_data['table_name'] = table_name or f"Таблица {table_idx + 1}"
