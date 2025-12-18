@@ -11,5 +11,8 @@
     "enabled": true,
     "target_level": 3,
     "max_chunk_size": 1000
+  },
+  "logging": {
+    "level": "DEBUG"
   }
 }

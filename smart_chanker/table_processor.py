@@ -216,10 +216,45 @@ class TableProcessor:
             column_attribute_columns = analysis["column_attribute_columns"]
             global_attrs_by_row = analysis["global_attrs_by_row"]
 
-            facts: List[Dict[str, Any]] = []
+            # Группируем факты по строкам (items)
+            items: List[Dict[str, Any]] = []
+            
             for row_idx in range(docx_table.rows):
                 if row_idx in row_attribute_rows:
                     continue
+                
+                # Собираем факты для текущей строки
+                row_facts: List[Dict[str, Any]] = []
+                item_name: Optional[str] = None
+                
+                # Определяем item_name из колонки-атрибута строки
+                # Ищем в колонках-атрибутах строки (column_attribute_columns) справа налево
+                # item_name обычно находится в последней колонке-атрибуте строки
+                for col_idx in sorted(column_attribute_columns, reverse=True):
+                    cell = grid[row_idx][col_idx]
+                    if cell and cell.text and cell.text.strip():
+                        item_name = cell.text.strip()
+                        break
+                
+                # Если не нашли в колонках-атрибутах, ищем в первой колонке данных строки
+                # (для случаев, когда нет колонок-атрибутов)
+                if not item_name:
+                    for col_idx in range(docx_table.cols):
+                        if col_idx in column_attribute_columns:
+                            continue
+                        cell = grid[row_idx][col_idx]
+                        if cell and cell.row == row_idx and cell.col == col_idx:
+                            if cell.text and cell.text.strip():
+                                item_name = cell.text.strip()
+                                break
+                        if item_name:
+                            break
+                
+                # Если item_name не найден, пропускаем строку
+                if not item_name:
+                    continue
+                
+                # Собираем факты для всех колонок данных этой строки
                 for col_idx in range(docx_table.cols):
                     if col_idx in column_attribute_columns:
                         continue
@@ -232,9 +267,8 @@ class TableProcessor:
                         continue
                     
                     cell_text = cell.text.strip()
-                    # Включаем все ячейки-значения, даже с пустым текстом
-                    # Пустое значение - это тоже информация (отсутствие работы в периоде)
 
+                    # Собираем атрибуты (без item_name)
                     attributes: List[str] = []
                     attributes.extend(global_attrs_by_row.get(row_idx, []))
                     attributes.extend(
@@ -242,11 +276,15 @@ class TableProcessor:
                             grid, row_idx, col_idx, row_attribute_rows
                         )
                     )
-                    attributes.extend(
-                        self.collect_row_header_chain(
-                            grid, row_idx, col_idx, column_attribute_columns
-                        )
+                    # Собираем заголовки строк из колонок-атрибутов (но исключаем item_name)
+                    row_header_chain = self.collect_row_header_chain(
+                        grid, row_idx, col_idx, column_attribute_columns
                     )
+                    # Исключаем item_name из цепочки заголовков строк
+                    for attr in row_header_chain:
+                        if attr != item_name:
+                            attributes.append(attr)
+                    
                     attributes.extend(
                         self.collect_attribute_row_values(
                             grid, row_idx, col_idx, row_attribute_rows
@@ -258,21 +296,35 @@ class TableProcessor:
                         )
                     )
 
+                    # Удаляем дубликаты и пустые значения
                     deduped: List[str] = []
                     seen = set()
                     for attr in attributes:
-                        if attr and attr not in seen:
+                        if attr and attr not in seen and attr != item_name:
                             seen.add(attr)
                             deduped.append(attr)
 
-                    facts.append({"value": cell_text, "attributes": deduped})
+                    # Создаем факт в формате table2.json: attributes, value, col
+                    row_facts.append({
+                        "attributes": deduped,
+                        "value": cell_text,
+                        "col": col_idx + 1  # col начинается с 1 (как в table2.json)
+                    })
+                
+                # Добавляем item только если есть факты
+                if row_facts:
+                    items.append({
+                        "item_name": item_name,
+                        "row": row_idx + 1,  # row начинается с 1 (как в table2.json)
+                        "facts": row_facts
+                    })
 
             if not table_name:
                 raise TableConversionError("Название таблицы не может быть пустым")
 
             table_data = {
                 "table_name": table_name,
-                "facts": facts,
+                "items": items,
             }
             json_str = json.dumps(table_data, ensure_ascii=False, indent=2)
             return f"```json\n{json_str}\n```"
@@ -286,7 +338,8 @@ class TableProcessor:
         max_chunk_size: int = 1000
     ) -> List[str]:
         """
-        Конвертация таблицы в список чанков с группировкой фактов
+        Конвертация таблицы в список чанков с группировкой по items
+        В чанк попадает целое число элементов items, кроме случаев, когда длина одного item превышает размер чанка
         
         Args:
             docx_table: Распарсенная таблица
@@ -294,7 +347,7 @@ class TableProcessor:
             max_chunk_size: Максимальный размер чанка в символах
             
         Returns:
-            Список JSON строк с чанками таблицы
+            Список JSON строк с чанками таблицы в формате table2.json
             
         Raises:
             TableConversionError: Если не удалось конвертировать таблицу
@@ -314,10 +367,45 @@ class TableProcessor:
             column_attribute_columns = analysis["column_attribute_columns"]
             global_attrs_by_row = analysis["global_attrs_by_row"]
 
-            facts: List[Dict[str, Any]] = []
+            # Группируем факты по строкам (items) - используем ту же логику, что и в docx_table_to_json
+            items: List[Dict[str, Any]] = []
+            
             for row_idx in range(docx_table.rows):
                 if row_idx in row_attribute_rows:
                     continue
+                
+                # Собираем факты для текущей строки
+                row_facts: List[Dict[str, Any]] = []
+                item_name: Optional[str] = None
+                
+                # Определяем item_name из колонки-атрибута строки
+                # Ищем в колонках-атрибутах строки (column_attribute_columns) справа налево
+                # item_name обычно находится в последней колонке-атрибуте строки
+                for col_idx in sorted(column_attribute_columns, reverse=True):
+                    cell = grid[row_idx][col_idx]
+                    if cell and cell.text and cell.text.strip():
+                        item_name = cell.text.strip()
+                        break
+                
+                # Если не нашли в колонках-атрибутах, ищем в первой колонке данных строки
+                # (для случаев, когда нет колонок-атрибутов)
+                if not item_name:
+                    for col_idx in range(docx_table.cols):
+                        if col_idx in column_attribute_columns:
+                            continue
+                        cell = grid[row_idx][col_idx]
+                        if cell and cell.row == row_idx and cell.col == col_idx:
+                            if cell.text and cell.text.strip():
+                                item_name = cell.text.strip()
+                                break
+                        if item_name:
+                            break
+                
+                # Если item_name не найден, пропускаем строку
+                if not item_name:
+                    continue
+                
+                # Собираем факты для всех колонок данных этой строки
                 for col_idx in range(docx_table.cols):
                     if col_idx in column_attribute_columns:
                         continue
@@ -330,8 +418,8 @@ class TableProcessor:
                         continue
                     
                     cell_text = cell.text.strip()
-                    # Включаем все ячейки-значения, даже с пустым текстом
 
+                    # Собираем атрибуты (без item_name)
                     attributes: List[str] = []
                     attributes.extend(global_attrs_by_row.get(row_idx, []))
                     attributes.extend(
@@ -339,11 +427,15 @@ class TableProcessor:
                             grid, row_idx, col_idx, row_attribute_rows
                         )
                     )
-                    attributes.extend(
-                        self.collect_row_header_chain(
-                            grid, row_idx, col_idx, column_attribute_columns
-                        )
+                    # Собираем заголовки строк из колонок-атрибутов (но исключаем item_name)
+                    row_header_chain = self.collect_row_header_chain(
+                        grid, row_idx, col_idx, column_attribute_columns
                     )
+                    # Исключаем item_name из цепочки заголовков строк
+                    for attr in row_header_chain:
+                        if attr != item_name:
+                            attributes.append(attr)
+                    
                     attributes.extend(
                         self.collect_attribute_row_values(
                             grid, row_idx, col_idx, row_attribute_rows
@@ -355,83 +447,122 @@ class TableProcessor:
                         )
                     )
 
+                    # Удаляем дубликаты и пустые значения
                     deduped: List[str] = []
                     seen = set()
                     for attr in attributes:
-                        if attr and attr not in seen:
+                        if attr and attr not in seen and attr != item_name:
                             seen.add(attr)
                             deduped.append(attr)
 
-                    facts.append({"value": cell_text, "attributes": deduped})
+                    # Создаем факт в формате table2.json: attributes, value, col
+                    row_facts.append({
+                        "attributes": deduped,
+                        "value": cell_text,
+                        "col": col_idx + 1  # col начинается с 1 (как в table2.json)
+                    })
+                
+                # Добавляем item только если есть факты
+                if row_facts:
+                    items.append({
+                        "item_name": item_name,
+                        "row": row_idx + 1,  # row начинается с 1 (как в table2.json)
+                        "facts": row_facts
+                    })
 
             if not table_name:
                 raise TableConversionError("Название таблицы не может быть пустым")
 
-            # Чанкуем факты по группам
-            chunks = self._chunk_table_facts(facts, table_name, max_chunk_size)
+            # Чанкуем items целиком
+            chunks = self._chunk_table_items(items, table_name, max_chunk_size)
             return chunks
         except Exception as e:
             raise TableConversionError(f"Ошибка конвертации таблицы: {e}") from e
     
-    def _chunk_table_facts(
+    def _chunk_table_items(
         self, 
-        facts: List[Dict[str, Any]], 
+        items: List[Dict[str, Any]], 
         table_name: str, 
         max_chunk_size: int
     ) -> List[str]:
         """
-        Разбивает факты таблицы на чанки с учетом максимального размера
+        Разбивает items таблицы на чанки с учетом максимального размера
+        В чанк попадает целое число элементов items, кроме случаев, когда длина одного item превышает размер чанка
         
         Args:
-            facts: Список фактов таблицы
+            items: Список items таблицы (в формате table2.json)
             table_name: Название таблицы
             max_chunk_size: Максимальный размер чанка в символах
             
         Returns:
-            Список JSON строк с чанками
+            Список JSON строк с чанками в формате table2.json
         """
         import json
         
-        if not facts:
-            # Если фактов нет, возвращаем один чанк с пустым списком
+        if not items:
+            # Если items нет, возвращаем один чанк с пустым списком
             table_data = {
                 "table_name": table_name,
-                "facts": [],
+                "items": [],
             }
             json_str = json.dumps(table_data, ensure_ascii=False, indent=2)
             return [f"```json\n{json_str}\n```"]
         
         chunks: List[str] = []
-        current_chunk_facts: List[Dict[str, Any]] = []
+        current_chunk_items: List[Dict[str, Any]] = []
         current_size = 0
         
         # Размер названия таблицы (включая структуру JSON)
-        table_name_overhead = len(f'{{"table_name": "{table_name}", "facts": []}}')
+        table_name_overhead = len(f'{{"table_name": "{table_name}", "items": []}}')
         
-        for fact in facts:
-            # Оцениваем размер факта в JSON
-            fact_json = json.dumps(fact, ensure_ascii=False)
-            fact_size = len(fact_json) + 2  # +2 для запятой и переноса строки
+        for item in items:
+            # Оцениваем размер item в JSON
+            item_json = json.dumps(item, ensure_ascii=False)
+            item_size = len(item_json) + 2  # +2 для запятой и переноса строки
             
-            # Если добавление факта превысит лимит, сохраняем текущий чанк
-            if current_chunk_facts and current_size + fact_size + table_name_overhead > max_chunk_size:
+            # Если размер одного item превышает max_chunk_size, он все равно попадает в чанк
+            # (единственный item в чанке)
+            if item_size + table_name_overhead > max_chunk_size:
+                # Сохраняем текущий чанк, если есть items
+                if current_chunk_items:
+                    table_data = {
+                        "table_name": table_name,
+                        "items": current_chunk_items,
+                    }
+                    json_str = json.dumps(table_data, ensure_ascii=False, indent=2)
+                    chunks.append(f"```json\n{json_str}\n```")
+                    current_chunk_items = []
+                    current_size = 0
+                
+                # Добавляем большой item в отдельный чанк
                 table_data = {
                     "table_name": table_name,
-                    "facts": current_chunk_facts,
+                    "items": [item],
                 }
                 json_str = json.dumps(table_data, ensure_ascii=False, indent=2)
                 chunks.append(f"```json\n{json_str}\n```")
-                current_chunk_facts = []
+                continue
+            
+            # Если добавление item превысит лимит, сохраняем текущий чанк
+            if current_chunk_items and current_size + item_size + table_name_overhead > max_chunk_size:
+                table_data = {
+                    "table_name": table_name,
+                    "items": current_chunk_items,
+                }
+                json_str = json.dumps(table_data, ensure_ascii=False, indent=2)
+                chunks.append(f"```json\n{json_str}\n```")
+                current_chunk_items = []
                 current_size = 0
             
-            current_chunk_facts.append(fact)
-            current_size += fact_size
+            # Добавляем item в текущий чанк
+            current_chunk_items.append(item)
+            current_size += item_size
         
-        # Добавляем последний чанк, если есть факты
-        if current_chunk_facts:
+        # Добавляем последний чанк, если есть items
+        if current_chunk_items:
             table_data = {
                 "table_name": table_name,
-                "facts": current_chunk_facts,
+                "items": current_chunk_items,
             }
             json_str = json.dumps(table_data, ensure_ascii=False, indent=2)
             chunks.append(f"```json\n{json_str}\n```")

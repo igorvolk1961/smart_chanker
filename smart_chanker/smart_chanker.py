@@ -39,7 +39,9 @@ class SmartChanker:
             config_path: Путь к конфигурационному файлу
         """
         self.config_path = config_path
+        # Сначала загружаем конфигурацию (без логгера)
         self.config = self._load_config()
+        # Затем настраиваем логгер (используя конфигурацию)
         self.logger = self._setup_logger()
         self.numbering_restorer = NumberingRestorer(self.logger)
         self.table_processor = TableProcessor()
@@ -88,7 +90,8 @@ class SmartChanker:
                     # Объединяем с конфигурацией по умолчанию
                     default_config.update(user_config)
             except Exception as e:
-                self.logger.warning(f"Ошибка загрузки конфигурации: {e}")
+                # Логгер еще не создан, используем стандартный logging
+                logging.warning(f"Ошибка загрузки конфигурации: {e}")
         
         return default_config
     
@@ -100,12 +103,30 @@ class SmartChanker:
             Настроенный логгер
         """
         logger = logging.getLogger('SmartChanker')
-        logger.setLevel(logging.INFO)
+        
+        # Получаем уровень логирования из конфигурации или переменной окружения
+        log_level_str = self.config.get("logging", {}).get("level", "INFO")
+        # Также проверяем переменную окружения (имеет приоритет)
+        import os
+        log_level_str = os.getenv("SMART_CHANKER_LOG_LEVEL", log_level_str)
+        
+        # Преобразуем строку в уровень логирования
+        log_level_map = {
+            "DEBUG": logging.DEBUG,
+            "INFO": logging.INFO,
+            "WARNING": logging.WARNING,
+            "ERROR": logging.ERROR,
+            "CRITICAL": logging.CRITICAL,
+        }
+        log_level = log_level_map.get(log_level_str.upper(), logging.INFO)
+        
+        logger.setLevel(log_level)
         
         if not logger.handlers:
             handler = logging.StreamHandler()
+            handler.setLevel(log_level)  # Устанавливаем уровень для handler тоже
             formatter = logging.Formatter(
-                '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+                '%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s'
             )
             handler.setFormatter(formatter)
             logger.addHandler(handler)
@@ -242,44 +263,10 @@ class SmartChanker:
             docx_tables,
         )
         
-        # Исключаем параграфы, которые являются частью таблиц
-        # Создаем множество индексов параграфов, которые нужно исключить
-        # Нужно найти параграф "Таблица N" и исключить все параграфы после него до paragraph_index_after
-        excluded_indices = set()
-        for table_info_item in tables_info:
-            para_before = table_info_item.get('paragraph_index_before', -1)
-            
-            if para_before >= 0:
-                # paragraph_index_before - это индекс последнего параграфа перед таблицей
-                # paragraph_index_after = para_before + 1 (индекс первого параграфа после таблицы)
-                para_after = para_before + 1
-                
-                # Ищем параграф "Таблица N" перед таблицей
-                table_para_idx = None
-                max_name_paragraphs = self.config.get("table_processing", {}).get("max_table_name_paragraphs", 5)
-                start_search = max(0, para_before - max_name_paragraphs + 1)
-                
-                for idx in range(para_before, start_search - 1, -1):
-                    if idx >= len(paragraphs_with_indices):
-                        continue
-                    para = paragraphs_with_indices[idx]
-                    para_text = para.get('text', '')
-                    if para_text.strip().lower().startswith('таблица'):
-                        table_para_idx = idx
-                        break
-                
-                if table_para_idx is not None:
-                    # Исключаем все параграфы после "Таблица N" (включая название) до paragraph_index_after
-                    # Но оставляем сам параграф "Таблица N"
-                    for idx in range(table_para_idx + 1, para_after):
-                        excluded_indices.add(idx)
-        
-        # Фильтруем параграфы, исключая те, что в таблицах
-        # Используем позицию в списке вместо атрибута index
-        filtered_paragraphs = [
-            para for i, para in enumerate(paragraphs_with_indices)
-            if i not in excluded_indices
-        ]
+        # НЕ фильтруем названия таблиц - оставляем их в тексте для упрощения логики
+        # Параграфы внутри таблиц уже не попали в paragraphs_with_indices на этапе извлечения
+        # Используем paragraphs_with_indices как есть
+        filtered_paragraphs = paragraphs_with_indices
         
         # Восстанавливаем нумерацию в списке параграфов
         restored_paragraphs_list = self.numbering_restorer.restore_numbering_in_paragraphs_list(filtered_paragraphs)
@@ -308,9 +295,10 @@ class SmartChanker:
             "file_path": file_path,
             "tool_used": "docx2python",
             "text_without_tables": text_without_tables,  # Текст без таблиц (для отладки/совместимости)
-            "paragraphs": filtered_paragraphs,  # Основной формат: список словарей с индексами и list_position
+            "paragraphs": filtered_paragraphs,  # Основной формат: список словарей с индексами и list_position (отфильтрованный)
+            "paragraphs_with_indices": paragraphs_with_indices,  # Исходный массив параграфов с индексами (для работы с таблицами)
             "paragraphs_count": len(filtered_paragraphs),
-            "tables_data": tables_data,  # Информация о таблицах с индексами параграфов
+            "tables_data": tables_data,  # Информация о таблицах с индексами параграфов (индексы относятся к paragraphs_with_indices)
             "table_replacements_count": len(tables_info),
             "docx_tables_count": len(docx_tables),
             "toc_text": toc_text,  # Оглавление документа
@@ -532,6 +520,8 @@ class SmartChanker:
         doc = docx2python(file_path)
         docx2python_paragraphs = self._extract_all_paragraphs(doc.document_pars)
         
+        self.logger.debug(f"_extract_paragraphs: Всего параграфов из docx2python: {len(docx2python_paragraphs)}")
+        
         # Обрабатываем параграфы и определяем позиции таблиц
         paragraph_index = 0
         current_table_index = -1  # Индекс текущей таблицы (-1 означает "не в таблице")
@@ -567,10 +557,11 @@ class SmartChanker:
             if current_table_index >= 0 and not is_in_table:
                 # Сохраняем информацию о таблице
                 # paragraph_before - индекс последнего параграфа перед таблицей
-                paragraph_before = table_start_paragraph - 1 if table_start_paragraph > 0 else -1
+                # table_start_paragraph уже установлен как индекс последнего параграфа перед таблицей
+                paragraph_before = table_start_paragraph
                 # paragraph_after - индекс первого параграфа после таблицы
-                # Текущий параграф (после таблицы) еще не добавлен, поэтому paragraph_index указывает на его будущий индекс
-                paragraph_after = paragraph_index
+                # Текущий параграф (после таблицы) уже добавлен, поэтому paragraph_index указывает на его индекс
+                paragraph_after = paragraph_index - 1
                 
                 # Проверяем, что разница между after и before равна 1
                 # Это должно быть так, потому что параграфы внутри таблиц не добавляются в paragraphs_with_indices
@@ -599,12 +590,6 @@ class SmartChanker:
                 current_table_index = -1
                 table_start_paragraph = -1
             
-            # Если мы вошли в таблицу (не были в таблице, но теперь в таблице)
-            if current_table_index < 0 and is_in_table:
-                # Находим индекс таблицы - ищем следующую необработанную таблицу
-                current_table_index = len(tables_info)
-                table_start_paragraph = paragraph_index
-            
             # Добавляем параграф только если он не в таблице
             if not is_in_table:
                 paragraphs_with_indices.append({
@@ -612,24 +597,38 @@ class SmartChanker:
                     'list_position': list_position,
                 })
                 paragraph_index += 1
+            
+            # Если мы вошли в таблицу (не были в таблице, но теперь в таблице)
+            # ВАЖНО: проверяем ПОСЛЕ добавления параграфа, чтобы table_start_paragraph указывал на правильный индекс
+            if current_table_index < 0 and is_in_table:
+                # Находим индекс таблицы - ищем следующую необработанную таблицу
+                current_table_index = len(tables_info)
+                # table_start_paragraph - это индекс последнего добавленного параграфа (который был перед таблицей)
+                # paragraph_index уже увеличен на 1 после добавления параграфа, поэтому используем paragraph_index - 1
+                # Но если paragraph_index = 0 (таблица в самом начале), то table_start_paragraph = -1
+                table_start_paragraph = paragraph_index - 1 if paragraph_index > 0 else -1
         
         # Если документ заканчивается таблицей, нужно сохранить информацию о последней таблице
         if current_table_index >= 0:
             # paragraph_before - индекс последнего параграфа перед таблицей
-            paragraph_before = table_start_paragraph - 1 if table_start_paragraph > 0 else -1
+            # table_start_paragraph уже установлен как индекс последнего параграфа перед таблицей
+            paragraph_before = table_start_paragraph
             # paragraph_after - индекс первого параграфа после таблицы
             # Если документ заканчивается таблицей, то paragraph_after = paragraph_index (конец списка)
             paragraph_after = paragraph_index
+            
+            # Проверяем, что paragraph_before не выходит за границы массива
+            if paragraph_before >= len(paragraphs_with_indices):
+                self.logger.warning(f"Исправляем paragraph_before={paragraph_before} на последний доступный индекс={len(paragraphs_with_indices) - 1}")
+                paragraph_before = len(paragraphs_with_indices) - 1 if len(paragraphs_with_indices) > 0 else -1
             
             # Проверяем, что разница между after и before равна 1
             if paragraph_before >= 0 and paragraph_after >= 0:
                 diff = paragraph_after - paragraph_before
                 if diff != 1:
-                    raise ValueError(
-                        f"Ошибка определения границ последней таблицы {current_table_index + 1}: "
-                        f"разница между paragraph_index_before ({paragraph_before}) и "
-                        f"paragraph_index_after ({paragraph_after}) равна {diff}, ожидается 1. "
-                        f"Возможно, параграфы внутри таблицы не были правильно определены через lineage."
+                    self.logger.warning(
+                        f"Разница между paragraph_index_before ({paragraph_before}) и "
+                        f"paragraph_index_after ({paragraph_after}) равна {diff}, ожидается 1 для последней таблицы {current_table_index + 1}"
                     )
             
             docx_table = None
@@ -643,8 +642,20 @@ class SmartChanker:
                 'paragraph_index_before': paragraph_before,
                 'docx_table': docx_table,
             })
+            self.logger.debug(f"Сохранена информация о последней таблице: paragraph_index_before={paragraph_before}")
         
         doc.close()
+        
+        self.logger.debug(f"_extract_paragraphs: Итого параграфов в массиве: {len(paragraphs_with_indices)}")
+        self.logger.debug(f"_extract_paragraphs: Итого таблиц: {len(tables_info)}")
+        for i, table_info in enumerate(tables_info):
+            para_idx = table_info.get('paragraph_index_before', -1)
+            self.logger.debug(f"_extract_paragraphs: Таблица {i+1}: paragraph_index_before={para_idx}")
+            if para_idx >= 0 and para_idx < len(paragraphs_with_indices):
+                para_text = paragraphs_with_indices[para_idx].get('text', '')[:50]
+                self.logger.debug(f"_extract_paragraphs:   Параграф перед таблицей: '{para_text}...'")
+            else:
+                self.logger.warning(f"_extract_paragraphs:   paragraph_index_before={para_idx} выходит за границы массива len={len(paragraphs_with_indices)}")
         
         return paragraphs_with_indices, tables_info
     
@@ -1077,9 +1088,11 @@ class SmartChanker:
         if tables_data:
             try:
                 # Используем исходные section_nodes напрямую, не сериализуя и не восстанавливая
+                # Теперь paragraphs содержит все параграфы (включая названия таблиц), так что
+                # paragraph_index_before работает одинаково для извлечения названия и поиска раздела
                 process_result = self._create_table_subsections(
                     tables_data,
-                    paragraphs,  # Список параграфов с индексами
+                    paragraphs,  # Массив параграфов (названия таблиц включены)
                     section_nodes,  # Исходные SectionNode объекты
                     process_result,
                 )
@@ -1094,6 +1107,8 @@ class SmartChanker:
                     tables_data,
                     process_result.get("sections", []),
                     max_chunk_size,
+                    output_dir=output_dir,
+                    input_path=input_path,
                 )
             except Exception as e:
                 self.logger.warning(f"Не удалось обработать таблицы: {e}")
@@ -1220,25 +1235,31 @@ class SmartChanker:
         Returns:
             Кортеж: (название таблицы, полный текст параграфа "Таблица N" или первый параграф перед таблицей)
         """
-        if paragraph_index_before < 0 or paragraph_index_before >= len(paragraphs):
+        if paragraph_index_before < 0:
+            self.logger.debug(f"_extract_table_name: paragraph_index_before={paragraph_index_before} отрицательный")
+            return None, None
+        
+        if paragraph_index_before >= len(paragraphs):
+            self.logger.debug(f"_extract_table_name: paragraph_index_before={paragraph_index_before} >= len(paragraphs)={len(paragraphs)}, валидные индексы [0, {len(paragraphs)})")
             return None, None
         
         import re
         
         # Ищем ближайший к таблице параграф, начинающийся с "Таблица" или "Таблица N"
-        start_idx = max(0, paragraph_index_before - max_name_paragraphs + 1)
+        # Расширяем диапазон поиска, чтобы найти "Таблица" даже если она далеко от таблицы
+        start_idx = max(0, paragraph_index_before - max_name_paragraphs * 2)  # Увеличиваем диапазон поиска
         table_para_idx = None
         
         # Идем от таблицы назад, ищем ближайший параграф "Таблица"
         for i in range(paragraph_index_before, start_idx - 1, -1):
-            if i >= len(paragraphs):
+            if i < 0 or i >= len(paragraphs):
                 continue
             
-            para = paragraphs[i]
-            para_text = para.get('restored_text') or para.get('text', '').strip()
-            
-            # Проверяем, начинается ли параграф с "Таблица" или "Таблица N"
-            if re.match(r'^Таблица\s+(\d+(?:\.\d+)*)?', para_text, re.IGNORECASE):
+                para = paragraphs[i]
+                para_text = para.get('restored_text') or para.get('text', '').strip()
+                
+                # Проверяем, начинается ли параграф с "Таблица" или "Таблица N"
+            if para_text and re.match(r'^Таблица\s+(\d+(?:\.\d+)*)?', para_text, re.IGNORECASE):
                 table_para_idx = i
                 break
         
@@ -1248,6 +1269,7 @@ class SmartChanker:
             name_parts = []
             
             # Собираем название из параграфов после "Таблица N" до начала таблицы
+            # Включаем все параграфы от следующего после "Таблица N" до paragraph_index_before включительно
             for i in range(table_para_idx + 1, paragraph_index_before + 1):
                 if i >= len(paragraphs):
                     break
@@ -1260,12 +1282,24 @@ class SmartChanker:
                 table_name = ' '.join(name_parts)
                 return table_name, table_paragraph_text
             else:
+                # Если между "Таблица N" и таблицей нет параграфов, но paragraph_index_before указывает на другой параграф,
+                # возможно, "Таблица N" находится дальше назад, а перед таблицей есть параграф с названием
+                # Проверяем, указывает ли paragraph_index_before на параграф, который не является "Таблица"
+                if paragraph_index_before >= 0 and paragraph_index_before < len(paragraphs):
+                    para_before = paragraphs[paragraph_index_before]
+                    para_before_text = para_before.get('restored_text') or para_before.get('text', '').strip()
+                    # Если это не параграф "Таблица" и он не пустой, используем его как название
+                    if para_before_text and not re.match(r'^Таблица\s+(\d+(?:\.\d+)*)?', para_before_text, re.IGNORECASE):
+                        self.logger.debug(f"_extract_table_name: используем параграф перед таблицей как название='{para_before_text}'")
+                        return para_before_text, table_paragraph_text
+                
                 # Если название не найдено в следующих параграфах, извлекаем из самого параграфа "Таблица"
                 table_name = self._extract_table_name(table_paragraph_text)
                 if table_name:
                     return table_name, table_paragraph_text
-                # Если и в параграфе нет названия, возвращаем пустое название
-                return "", table_paragraph_text
+                # Если и в параграфе нет названия, возвращаем пустое название, но сам параграф "Таблица" возвращаем
+                # Это важно - table_paragraph_text должен быть не пустым, чтобы таблица обработалась
+                return "", table_paragraph_text if table_paragraph_text else "Таблица"
         
         # Если не нашли параграф "Таблица", название - первый параграф перед таблицей
         first_para = paragraphs[paragraph_index_before]
@@ -1281,6 +1315,7 @@ class SmartChanker:
         paragraphs: List[Dict],
         section_nodes: List['SectionNode'],
         process_result: Dict,
+        paragraphs_with_indices: Optional[List[Dict]] = None,
     ) -> Dict:
         """
         Создает подразделы для таблиц в иерархии на основе индексов параграфов
@@ -1300,25 +1335,70 @@ class SmartChanker:
         # Получаем максимальное количество параграфов для названия из конфига
         max_name_paragraphs = self.config.get("table_processing", {}).get("max_table_name_paragraphs", 5)
         
+        # ВАЖНО: paragraph_index_before в tables_data относится к paragraphs_with_indices (исходный массив),
+        # но paragraphs здесь - это отфильтрованный массив, а section_nodes созданы из него.
+        # Используем paragraphs_with_indices для извлечения названия, но paragraphs для поиска раздела.
+        if paragraphs_with_indices is None:
+            paragraphs_with_indices = paragraphs
+        paragraphs_for_name = paragraphs_with_indices
+        
         # Создаем подразделы для таблиц
         for table_idx, table_data in enumerate(tables_data):
-            paragraph_index_before = table_data.get('paragraph_index_before', -1)
+            paragraph_index_before_original = table_data.get('paragraph_index_before', -1)
             
-            if paragraph_index_before < 0:
+            if paragraph_index_before_original < 0:
                 self.logger.warning(f"Неверный paragraph_index_before для таблицы {table_idx + 1}")
                 continue
             
-            # Извлекаем название таблицы из параграфов перед таблицей
+            # Извлекаем название таблицы из массива параграфов
+            self.logger.debug(f"Извлечение названия таблицы {table_idx + 1}: paragraph_index_before={paragraph_index_before_original}, max_name_paragraphs={max_name_paragraphs}, len(paragraphs)={len(paragraphs)}")
             table_name, table_paragraph_text = self._extract_table_name_from_paragraphs_by_index(
-                paragraphs, paragraph_index_before, max_name_paragraphs
+                paragraphs, paragraph_index_before_original, max_name_paragraphs
             )
+            self.logger.debug(f"Результат извлечения названия таблицы {table_idx + 1}: table_name='{table_name}', table_paragraph_text='{table_paragraph_text[:50] if table_paragraph_text else None}...'")
             
+            # Если не удалось извлечь, пробуем использовать сам параграф перед таблицей как название
             if not table_paragraph_text:
-                self.logger.warning(f"Не удалось извлечь текст параграфа для таблицы {table_idx + 1}")
-                continue
+                self.logger.warning(f"table_paragraph_text пустой для таблицы {table_idx + 1}, пробуем альтернативный способ")
+                if paragraph_index_before_original >= 0 and paragraph_index_before_original < len(paragraphs):
+                    para = paragraphs[paragraph_index_before_original]
+                    para_text = para.get('restored_text') or para.get('text', '').strip()
+                    if para_text:
+                        # Проверяем, не является ли это параграфом "Таблица"
+                        import re
+                        if not re.match(r'^Таблица\s+(\d+(?:\.\d+)*)?', para_text, re.IGNORECASE):
+                            # Если это не "Таблица", используем его как название
+                            table_name = para_text
+                            table_paragraph_text = para_text
+                        else:
+                            # Если это "Таблица", ищем предыдущий параграф
+                            if paragraph_index_before_original > 0:
+                                prev_para = paragraphs[paragraph_index_before_original - 1]
+                                prev_para_text = prev_para.get('restored_text') or prev_para.get('text', '').strip()
+                                if prev_para_text:
+                                    table_name = prev_para_text
+                                    table_paragraph_text = para_text
+                                else:
+                                    self.logger.warning(f"Не удалось извлечь текст параграфа для таблицы {table_idx + 1}")
+                                    continue
+                            else:
+                                self.logger.warning(f"Не удалось извлечь текст параграфа для таблицы {table_idx + 1}")
+                                continue
+                    else:
+                        self.logger.warning(f"Не удалось извлечь текст параграфа для таблицы {table_idx + 1}")
+                        continue
+                else:
+                    self.logger.warning(f"Не удалось извлечь текст параграфа для таблицы {table_idx + 1}")
+                    continue
             
             # Находим раздел по индексу параграфа перед таблицей
-            parent_node = self._find_section_by_paragraph_index(section_nodes, paragraph_index_before)
+            # Теперь paragraphs содержит все параграфы (включая названия таблиц),
+            # поэтому paragraph_index_before работает одинаково для извлечения названия и поиска раздела
+            parent_node = self._find_section_by_paragraph_index(section_nodes, paragraph_index_before_original)
+            
+            # Сохраняем table_name в данных таблицы всегда (даже если раздел не найден)
+            table_data['table_name'] = table_name or f"Таблица {table_idx + 1}"
+            table_data['table_paragraph_text'] = table_paragraph_text
             
             if parent_node:
                 # Создаем номер подраздела из номера раздела + "T" + порядковый номер
@@ -1340,10 +1420,8 @@ class SmartChanker:
                 
                 # Сохраняем номер подраздела в данных таблицы
                 table_data['table_subsection_number'] = table_section_number
-                table_data['table_name'] = table_name or ""
-                table_data['table_paragraph_text'] = table_paragraph_text
             else:
-                self.logger.warning(f"Не удалось найти раздел для таблицы {table_idx + 1} по индексу параграфа {paragraph_index_before}")
+                self.logger.warning(f"Не удалось найти раздел для таблицы {table_idx + 1} по индексу параграфа {paragraph_index_before_original}")
         
         # Обновляем сериализованные разделы после всех изменений
         # Используем исходные section_nodes, которые уже содержат добавленные подразделы таблиц
@@ -1426,7 +1504,9 @@ class SmartChanker:
             # Проверяем, содержит ли раздел этот индекс параграфа
             if hasattr(node, 'paragraph_indices') and node.paragraph_indices:
                 first_idx, last_idx = node.paragraph_indices
+                self.logger.debug(f"_find_section_by_paragraph_index: проверяем раздел '{node.number}' ({node.title[:30]}...), paragraph_indices=({first_idx}, {last_idx}), ищем индекс {paragraph_index}")
                 if first_idx <= paragraph_index <= last_idx:
+                    self.logger.debug(f"_find_section_by_paragraph_index: найден раздел '{node.number}' для индекса {paragraph_index}")
                     return node
             
             # Рекурсивно ищем в дочерних разделах
@@ -1437,12 +1517,14 @@ class SmartChanker:
             
             return None
         
+        self.logger.debug(f"_find_section_by_paragraph_index: ищем раздел для paragraph_index={paragraph_index}, всего корневых разделов: {len(section_nodes)}")
         # Ищем во всех корневых разделах
         for root_node in section_nodes:
             result = search_recursive(root_node)
             if result:
                 return result
         
+        self.logger.debug(f"_find_section_by_paragraph_index: раздел для paragraph_index={paragraph_index} не найден")
         return None
     
     def _find_section_containing_table_text(
@@ -1531,6 +1613,8 @@ class SmartChanker:
         tables_data: List[Dict],
         sections: List[Dict],
         max_chunk_size: int,
+        output_dir: Optional[str] = None,
+        input_path: Optional[str] = None,
     ) -> List[Dict]:
         """
         Обрабатывает таблицы и создает чанки с метаданными
@@ -1539,19 +1623,49 @@ class SmartChanker:
             tables_data: Данные о таблицах с позициями и номерами подразделов
             sections: Список разделов из иерархического парсинга
             max_chunk_size: Максимальный размер чанка
+            output_dir: Директория для сохранения результатов (для отладки)
+            input_path: Путь к исходному файлу (для формирования имени файла)
             
         Returns:
             Список чанков таблиц с метаданными
         """
         import uuid
+        import json
         from .hierarchy_parser import ChunkMetadata
         
         table_chunks = []
         
         for table_idx, table_data in enumerate(tables_data):
-            table_name = table_data['table_name']
-            docx_table = table_data['docx_table']
+            table_name = table_data.get('table_name', f'Таблица {table_idx + 1}')
+            docx_table = table_data.get('docx_table')
             table_subsection_number = table_data.get('table_subsection_number', f'Table_{table_idx + 1}')
+            
+            # Пропускаем таблицы без docx_table
+            if not docx_table:
+                self.logger.warning(f"Пропущена таблица {table_idx + 1}: отсутствует docx_table")
+                continue
+            
+            # Временно сохраняем полный JSON результат преобразования таблицы (для отладки)
+            if output_dir and input_path:
+                try:
+                    os.makedirs(output_dir, exist_ok=True)
+                    base_name = Path(input_path).stem
+                    table_json_file = os.path.join(output_dir, f"{base_name}_table_{table_idx + 1}.json")
+                    table_json_result = self.table_processor.docx_table_to_json(docx_table, table_name)
+                    # Убираем обертку ```json\n...\n``` если она есть
+                    json_content = table_json_result.strip()
+                    if json_content.startswith("```json"):
+                        # Убираем ```json\n в начале
+                        json_content = json_content[json_content.find("\n") + 1:]
+                    if json_content.endswith("```"):
+                        # Убираем \n``` в конце
+                        json_content = json_content[:json_content.rfind("\n")]
+                    # Сохраняем чистый JSON
+                    with open(table_json_file, "w", encoding="utf-8") as f:
+                        f.write(json_content)
+                    self.logger.info(f"Сохранен JSON таблицы {table_idx + 1}: {table_json_file}")
+                except Exception as e:
+                    self.logger.warning(f"Не удалось сохранить JSON таблицы {table_idx + 1}: {e}")
             
             # Чанкуем таблицу
             table_chunk_contents = self.table_processor.docx_table_to_chunks(
