@@ -1255,10 +1255,10 @@ class SmartChanker:
             if i < 0 or i >= len(paragraphs):
                 continue
             
-                para = paragraphs[i]
-                para_text = para.get('restored_text') or para.get('text', '').strip()
-                
-                # Проверяем, начинается ли параграф с "Таблица" или "Таблица N"
+            para = paragraphs[i]
+            para_text = para.get('restored_text') or para.get('text', '').strip()
+            
+            # Проверяем, начинается ли параграф с "Таблица" или "Таблица N"
             if para_text and re.match(r'^Таблица\s+(\d+(?:\.\d+)*)?', para_text, re.IGNORECASE):
                 table_para_idx = i
                 break
