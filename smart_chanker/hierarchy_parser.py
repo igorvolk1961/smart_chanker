@@ -160,6 +160,8 @@ class HierarchyParser:
         hierarchy_stack = []
         current_flat_list = None
         last_section = None  # Последний созданный раздел
+        current_zero_section = None  # Текущий раздел "0" для объединения параграфов без нумерации (только до первого нумерованного раздела)
+        has_numbered_section = False  # Флаг: был ли создан хотя бы один нумерованный раздел
         i = 0
         max_paragraphs_after_table = 3  # используем общий конфиг-лимит
         
@@ -236,6 +238,9 @@ class HierarchyParser:
                         parent.tables.append(table_section_number)
                         self.sections.append(table_section)
                         last_section = table_section
+                        # Сбрасываем текущий раздел "0", так как появилась таблица
+                        current_zero_section = None
+                        has_numbered_section = True
                         # Продолжаем после конца таблицы
                         i = fence_end + 1
                         continue
@@ -271,9 +276,16 @@ class HierarchyParser:
                     self.sections.append(new_section)
                     hierarchy_stack.append(new_section)
                     last_section = new_section
+                    # Сбрасываем текущий раздел "0", так как появился дочерний раздел
+                    current_zero_section = None
+                    has_numbered_section = True
                     i += 1
                     continue
 
+                # Сбрасываем текущий раздел "0", так как появился нумерованный раздел
+                current_zero_section = None
+                has_numbered_section = True
+                
                 # Создаем новый раздел (обычный случай)
                 new_section = self._create_section(line, number)
                 
@@ -336,14 +348,24 @@ class HierarchyParser:
                     current_section = hierarchy_stack[-1]
                     current_section.content += f"\n{line}"
                 else:
-                    # Создаем корневой раздел для абзаца без нумерации
-                    current_section = SectionNode(
-                        number="0",
-                        title=line[:50] + "..." if len(line) > 50 else line,
-                        level=0,
-                        content=line
-                    )
-                    self.sections.append(current_section)
+                    # Если уже были нумерованные разделы, добавляем к последнему разделу
+                    if has_numbered_section and last_section:
+                        last_section.content += f"\n{line}"
+                    else:
+                        # Объединяем все параграфы без нумерации в один раздел "0" (только до первого нумерованного раздела)
+                        if current_zero_section is None:
+                            # Создаем корневой раздел для абзаца без нумерации (только один раз)
+                            current_zero_section = SectionNode(
+                                number="0",
+                                title=line[:50] + "..." if len(line) > 50 else line,
+                                level=0,
+                                content=line
+                            )
+                            self.sections.append(current_zero_section)
+                            last_section = current_zero_section
+                        else:
+                            # Добавляем содержимое к существующему разделу "0"
+                            current_zero_section.content += f"\n{line}"
             i += 1
         
         # Завершаем последний список
