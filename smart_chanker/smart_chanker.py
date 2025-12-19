@@ -1047,6 +1047,8 @@ class SmartChanker:
         hconf = self.config.get("hierarchical_chunking", {})
         target_level = hconf.get("target_level", 3)
         max_chunk_size = hconf.get("max_chunk_size", 1000)
+        chunk_overlap_percent_text = hconf.get("chunk_overlap_percent_text", 20.0)
+        chunk_overlap_percent_table = hconf.get("chunk_overlap_percent_table", 0.0)
         
         # Получаем параграфы из результата обработки
         paragraphs = docx2python_result.get("paragraphs", [])
@@ -1058,7 +1060,7 @@ class SmartChanker:
         
         # Генерируем чанки
         from .semantic_chunker import SemanticChunker
-        semantic_chunker = SemanticChunker(max_chunk_size=max_chunk_size)
+        semantic_chunker = SemanticChunker(max_chunk_size=max_chunk_size, chunk_overlap_percent=chunk_overlap_percent_text)
         chunks = semantic_chunker.generate_chunks(section_nodes, target_level=target_level)
         
         # Сериализуем результат
@@ -1107,6 +1109,7 @@ class SmartChanker:
                     tables_data,
                     process_result.get("sections", []),
                     max_chunk_size,
+                    chunk_overlap_percent_table,
                     output_dir=output_dir,
                     input_path=input_path,
                 )
@@ -1614,6 +1617,7 @@ class SmartChanker:
         tables_data: List[Dict],
         sections: List[Dict],
         max_chunk_size: int,
+        chunk_overlap_percent_table: float = 0.0,
         output_dir: Optional[str] = None,
         input_path: Optional[str] = None,
     ) -> List[Dict]:
@@ -1624,6 +1628,7 @@ class SmartChanker:
             tables_data: Данные о таблицах с позициями и номерами подразделов
             sections: Список разделов из иерархического парсинга
             max_chunk_size: Максимальный размер чанка
+            chunk_overlap_percent_table: Процент перекрытия для чанков таблиц (от max_chunk_size)
             output_dir: Директория для сохранения результатов (для отладки)
             input_path: Путь к исходному файлу (для формирования имени файла)
             
@@ -1669,8 +1674,9 @@ class SmartChanker:
                     self.logger.warning(f"Не удалось сохранить JSON таблицы {table_idx + 1}: {e}")
             
             # Чанкуем таблицу
+            chunk_overlap_size_table = int(max_chunk_size * chunk_overlap_percent_table / 100.0)
             table_chunk_contents = self.table_processor.docx_table_to_chunks(
-                docx_table, table_name, max_chunk_size
+                docx_table, table_name, max_chunk_size, chunk_overlap_size_table
             )
             
             # Создаем чанки с метаданными

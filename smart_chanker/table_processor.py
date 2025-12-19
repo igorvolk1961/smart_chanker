@@ -335,7 +335,8 @@ class TableProcessor:
         self, 
         docx_table: ParsedDocxTable, 
         table_name: str, 
-        max_chunk_size: int = 1000
+        max_chunk_size: int = 1000,
+        chunk_overlap_size: int = 0
     ) -> List[str]:
         """
         Конвертация таблицы в список чанков с группировкой по items
@@ -473,8 +474,11 @@ class TableProcessor:
             if not table_name:
                 raise TableConversionError("Название таблицы не может быть пустым")
 
+            # Нормализуем пробелы в названии таблицы перед чанкованием
+            table_name = self._normalize_whitespace(table_name)
+            
             # Чанкуем items целиком
-            chunks = self._chunk_table_items(items, table_name, max_chunk_size)
+            chunks = self._chunk_table_items(items, table_name, max_chunk_size, chunk_overlap_size)
             return chunks
         except Exception as e:
             raise TableConversionError(f"Ошибка конвертации таблицы: {e}") from e
@@ -483,16 +487,19 @@ class TableProcessor:
         self, 
         items: List[Dict[str, Any]], 
         table_name: str, 
-        max_chunk_size: int
+        max_chunk_size: int,
+        chunk_overlap_size: int = 200
     ) -> List[str]:
         """
-        Разбивает items таблицы на чанки с учетом максимального размера
-        В чанк попадает целое число элементов items, кроме случаев, когда длина одного item превышает размер чанка
+        Разбивает items таблицы на чанки с учетом максимального размера и перекрытия
+        В чанк попадает целое число элементов items или целое число facts внутри item.
+        При разбиении больших items используется перекрытие по facts.
         
         Args:
             items: Список items таблицы (в формате table2.json)
             table_name: Название таблицы
             max_chunk_size: Максимальный размер чанка в символах
+            chunk_overlap_size: Размер перекрытия в символах (используется для вычисления количества facts для перекрытия)
             
         Returns:
             Список JSON строк с чанками в формате table2.json
@@ -505,8 +512,11 @@ class TableProcessor:
                 "table_name": table_name,
                 "items": [],
             }
-            json_str = json.dumps(table_data, ensure_ascii=False, indent=2)
-            return [f"```json\n{json_str}\n```"]
+            json_str = json.dumps(table_data, ensure_ascii=False)
+            chunk_content = f"```json\n{json_str}\n```"
+            # Нормализуем пробелы сразу после создания JSON
+            chunk_content = self._normalize_whitespace(chunk_content)
+            return [chunk_content]
         
         chunks: List[str] = []
         current_chunk_items: List[Dict[str, Any]] = []
@@ -516,12 +526,23 @@ class TableProcessor:
         table_name_overhead = len(f'{{"table_name": "{table_name}", "items": []}}')
         
         for item in items:
+            # Нормализуем пробелы в item_name перед обработкой
+            item_name = self._normalize_whitespace(item.get("item_name", ""))
+            row = item.get("row", 0)
+            facts = item.get("facts", [])
+            
+            # Нормализуем пробелы в facts
+            for fact in facts:
+                if "attributes" in fact:
+                    fact["attributes"] = [self._normalize_whitespace(str(attr)) for attr in fact["attributes"]]
+                if "value" in fact:
+                    fact["value"] = self._normalize_whitespace(str(fact["value"]))
+            
             # Оцениваем размер item в JSON
             item_json = json.dumps(item, ensure_ascii=False)
             item_size = len(item_json) + 2  # +2 для запятой и переноса строки
             
-            # Если размер одного item превышает max_chunk_size, он все равно попадает в чанк
-            # (единственный item в чанке)
+            # Если размер одного item превышает max_chunk_size, разбиваем его на части с перекрытием
             if item_size + table_name_overhead > max_chunk_size:
                 # Сохраняем текущий чанк, если есть items
                 if current_chunk_items:
@@ -529,18 +550,19 @@ class TableProcessor:
                         "table_name": table_name,
                         "items": current_chunk_items,
                     }
-                    json_str = json.dumps(table_data, ensure_ascii=False, indent=2)
-                    chunks.append(f"```json\n{json_str}\n```")
+                    json_str = json.dumps(table_data, ensure_ascii=False)
+                    chunk_content = f"```json\n{json_str}\n```"
+                    # Нормализуем пробелы сразу после создания JSON
+                    chunk_content = self._normalize_whitespace(chunk_content)
+                    chunks.append(chunk_content)
                     current_chunk_items = []
                     current_size = 0
                 
-                # Добавляем большой item в отдельный чанк
-                table_data = {
-                    "table_name": table_name,
-                    "items": [item],
-                }
-                json_str = json.dumps(table_data, ensure_ascii=False, indent=2)
-                chunks.append(f"```json\n{json_str}\n```")
+                # Разбиваем большой item на части с перекрытием по facts
+                item_parts = self._split_item_with_overlap(
+                    item_name, row, facts, table_name, max_chunk_size, chunk_overlap_size
+                )
+                chunks.extend(item_parts)
                 continue
             
             # Если добавление item превысит лимит, сохраняем текущий чанк
@@ -549,8 +571,11 @@ class TableProcessor:
                     "table_name": table_name,
                     "items": current_chunk_items,
                 }
-                json_str = json.dumps(table_data, ensure_ascii=False, indent=2)
-                chunks.append(f"```json\n{json_str}\n```")
+                json_str = json.dumps(table_data, ensure_ascii=False)
+                chunk_content = f"```json\n{json_str}\n```"
+                # Нормализуем пробелы сразу после создания JSON
+                chunk_content = self._normalize_whitespace(chunk_content)
+                chunks.append(chunk_content)
                 current_chunk_items = []
                 current_size = 0
             
@@ -564,8 +589,174 @@ class TableProcessor:
                 "table_name": table_name,
                 "items": current_chunk_items,
             }
-            json_str = json.dumps(table_data, ensure_ascii=False, indent=2)
-            chunks.append(f"```json\n{json_str}\n```")
+            json_str = json.dumps(table_data, ensure_ascii=False)
+            chunk_content = f"```json\n{json_str}\n```"
+            # Нормализуем пробелы сразу после создания JSON
+            chunk_content = self._normalize_whitespace(chunk_content)
+            chunks.append(chunk_content)
+        
+        return chunks
+    
+    def _normalize_whitespace(self, text: str) -> str:
+        """
+        Заменяет последовательности из более чем одного пробельного символа на один пробел.
+        Сохраняет все переносы строк (одиночные и множественные) для RAG.
+        
+        Args:
+            text: Текст для нормализации
+            
+        Returns:
+            Текст с нормализованными пробелами, но сохраненными переносами строк
+        """
+        from .utils import normalize_whitespace
+        return normalize_whitespace(text)
+    
+    def _split_item_with_overlap(
+        self,
+        item_name: str,
+        row: int,
+        facts: List[Dict[str, Any]],
+        table_name: str,
+        max_chunk_size: int,
+        chunk_overlap_size: int
+    ) -> List[str]:
+        """
+        Разбивает большой item на части с перекрытием по facts.
+        Каждая часть содержит целое число facts и имеет правильную JSON-структуру.
+        
+        Args:
+            item_name: Название item
+            row: Номер строки
+            facts: Список facts для item
+            table_name: Название таблицы
+            max_chunk_size: Максимальный размер чанка
+            chunk_overlap_size: Размер перекрытия в символах
+            
+        Returns:
+            Список JSON строк с частями item
+        """
+        import json
+        
+        if not facts:
+            # Если facts нет, возвращаем один чанк с пустым списком facts
+            item_part = {
+                "item_name": item_name,
+                "row": row,
+                "facts": []
+            }
+            table_data = {
+                "table_name": table_name,
+                "items": [item_part],
+            }
+            json_str = json.dumps(table_data, ensure_ascii=False)
+            chunk_content = f"```json\n{json_str}\n```"
+            # Нормализуем пробелы сразу после создания JSON
+            chunk_content = self._normalize_whitespace(chunk_content)
+            return [chunk_content]
+        
+        chunks: List[str] = []
+        table_name_overhead = len(f'{{"table_name": "{table_name}", "items": []}}')
+        
+        # Базовый размер структуры item (без facts)
+        base_item_structure = {
+            "item_name": item_name,
+            "row": row,
+            "facts": []
+        }
+        base_item_size = len(json.dumps(base_item_structure, ensure_ascii=False))
+        
+        # Вычисляем размер одного fact для оценки перекрытия
+        if facts:
+            sample_fact_json = json.dumps(facts[0], ensure_ascii=False)
+            avg_fact_size = len(sample_fact_json)
+        else:
+            avg_fact_size = 100  # Примерная оценка
+        
+        # Вычисляем количество facts для перекрытия (примерно)
+        overlap_facts_count = max(1, int(chunk_overlap_size / avg_fact_size) if avg_fact_size > 0 else 1)
+        
+        start_idx = 0
+        
+        while start_idx < len(facts):
+            # Пробуем добавить facts пока не превысим лимит
+            end_idx = start_idx
+            current_facts = []
+            current_size = table_name_overhead + base_item_size
+            
+            # Добавляем facts пока помещаются
+            while end_idx < len(facts):
+                test_facts = facts[start_idx:end_idx + 1]
+                test_item = {
+                    "item_name": item_name,
+                    "row": row,
+                    "facts": test_facts
+                }
+                test_size = len(json.dumps({
+                    "table_name": table_name,
+                    "items": [test_item]
+                }, ensure_ascii=False))
+                
+                if test_size > max_chunk_size and current_facts:
+                    # Превысили лимит, используем предыдущий набор facts
+                    break
+                
+                current_facts = test_facts
+                current_size = test_size
+                end_idx += 1
+            
+            # Если не удалось добавить ни одного fact, добавляем хотя бы один
+            if not current_facts:
+                current_facts = [facts[start_idx]]
+                end_idx = start_idx + 1
+            
+            # Создаем часть item
+            item_part = {
+                "item_name": item_name,
+                "row": row,
+                "facts": current_facts
+            }
+            table_data = {
+                "table_name": table_name,
+                "items": [item_part],
+            }
+            json_str = json.dumps(table_data, ensure_ascii=False)
+            chunk_content = f"```json\n{json_str}\n```"
+            # Нормализуем пробелы сразу после создания JSON
+            chunk_content = self._normalize_whitespace(chunk_content)
+            chunk_size = len(chunk_content)
+            
+            # Проверяем, что размер чанка не превышает max_chunk_size
+            # Если превышает, пытаемся уменьшить количество facts
+            if chunk_size > max_chunk_size and len(current_facts) > 1:
+                # Пробуем уменьшить количество facts
+                while len(current_facts) > 1 and chunk_size > max_chunk_size:
+                    current_facts = current_facts[:-1]
+                    item_part = {
+                        "item_name": item_name,
+                        "row": row,
+                        "facts": current_facts
+                    }
+                    table_data = {
+                        "table_name": table_name,
+                        "items": [item_part],
+                    }
+                    json_str = json.dumps(table_data, ensure_ascii=False)
+                    chunk_content = f"```json\n{json_str}\n```"
+                    # Нормализуем пробелы сразу после создания JSON
+                    chunk_content = self._normalize_whitespace(chunk_content)
+                    chunk_size = len(chunk_content)
+                    end_idx = start_idx + len(current_facts)
+            
+            chunks.append(chunk_content)
+            
+            # Переходим к следующей части с перекрытием
+            if end_idx >= len(facts):
+                break
+            
+            # Вычисляем начало следующей части с учетом перекрытия
+            # Перекрытие должно быть целым числом facts
+            overlap_count = min(overlap_facts_count, len(current_facts))
+            start_idx = end_idx - overlap_count
         
         return chunks
 

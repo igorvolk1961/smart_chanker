@@ -20,14 +20,16 @@ class Chunk:
 class SemanticChunker:
     """Генератор семантических чанков"""
     
-    def __init__(self, max_chunk_size: int = 1000):
+    def __init__(self, max_chunk_size: int = 1000, chunk_overlap_percent: float = 20.0):
         """
         Инициализация чанкера
         
         Args:
             max_chunk_size: Максимальный размер чанка в символах
+            chunk_overlap_percent: Процент перекрытия от max_chunk_size (по умолчанию 20%)
         """
         self.max_chunk_size = max_chunk_size
+        self.chunk_overlap_size = int(max_chunk_size * chunk_overlap_percent / 100.0)
     
     def generate_chunks(self, sections: List[SectionNode], 
                        target_level: int = 3) -> List[Chunk]:
@@ -77,6 +79,9 @@ class SemanticChunker:
         Returns:
             Список чанков раздела
         """
+        # Нормализуем пробелы перед чанкованием
+        section.content = self._normalize_whitespace(section.content)
+        
         if self._section_fits_in_chunk(section):
             return [self._create_single_chunk(section)]
         
@@ -123,7 +128,7 @@ class SemanticChunker:
     
     def _split_section(self, section: SectionNode) -> List[Chunk]:
         """
-        Разбивает большой раздел на несколько чанков
+        Разбивает большой раздел на несколько чанков с перекрытием
         
         Args:
             section: Раздел для разбивки
@@ -140,7 +145,7 @@ class SemanticChunker:
         # Разбиваем контент на элементы
         elements = self._split_content_to_elements(section.content)
         
-        for element in elements:
+        for element_idx, element in enumerate(elements):
             element_size = len(element)
             
             # Проверяем, помещается ли элемент в текущий чанк
@@ -164,13 +169,34 @@ class SemanticChunker:
                     section=section
                 ))
                 
-                # Начинаем новый чанк
-                current_chunk_content = []
-                current_size = 0
+                # Начинаем новый чанк с перекрытием
+                # Добавляем элементы из конца предыдущего чанка для перекрытия
+                overlap_elements = []
+                overlap_size = 0
+                
+                # Собираем элементы для перекрытия (с конца текущего чанка)
+                for i in range(len(current_chunk_content) - 1, -1, -1):
+                    elem = current_chunk_content[i]
+                    elem_size = len(elem) + (1 if i < len(current_chunk_content) - 1 else 0)  # +1 для \n
+                    
+                    if overlap_size + elem_size <= self.chunk_overlap_size:
+                        overlap_elements.insert(0, elem)
+                        overlap_size += elem_size
+                    else:
+                        break
+                
+                # Начинаем новый чанк с перекрытием
+                current_chunk_content = overlap_elements.copy()
+                current_size = overlap_size
                 chunk_number += 1
             
+            # Добавляем элемент в текущий чанк
             current_chunk_content.append(element)
-            current_size += element_size
+            # Пересчитываем размер с учетом форматирования (join с \n)
+            if len(current_chunk_content) > 1:
+                current_size = sum(len(elem) for elem in current_chunk_content) + len(current_chunk_content) - 1  # -1 для последнего \n
+            else:
+                current_size = element_size
             current_pos += element_size + 1  # +1 для символа новой строки
         
         # Создаем последний чанк
@@ -194,6 +220,20 @@ class SemanticChunker:
             ))
         
         return chunks
+    
+    def _normalize_whitespace(self, content: str) -> str:
+        """
+        Заменяет последовательности из более чем одного пробельного символа на один пробел.
+        Сохраняет все переносы строк (одиночные и множественные) для RAG.
+        
+        Args:
+            content: Текст для нормализации
+            
+        Returns:
+            Текст с нормализованными пробелами, но сохраненными переносами строк
+        """
+        from .utils import normalize_whitespace
+        return normalize_whitespace(content)
     
     def _split_content_to_elements(self, content: str) -> List[str]:
         """
