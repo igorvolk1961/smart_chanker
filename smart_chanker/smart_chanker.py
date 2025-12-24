@@ -561,7 +561,7 @@ class SmartChanker:
                 paragraph_before = table_start_paragraph
                 # paragraph_after - индекс первого параграфа после таблицы
                 # Текущий параграф (после таблицы) уже добавлен, поэтому paragraph_index указывает на его индекс
-                paragraph_after = paragraph_index - 1
+                paragraph_after = paragraph_index
                 
                 # Проверяем, что разница между after и before равна 1
                 # Это должно быть так, потому что параграфы внутри таблиц не добавляются в paragraphs_with_indices
