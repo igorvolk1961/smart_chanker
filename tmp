@@ -1,2 +1,0 @@
-я решил так. Чтобы упростить задачу, для в качестве исходных данных для конвертера будем использовать выходные файлы в папке output: xxx+hierarchical.json и xxx_+toc.txt
-В файле xxx+hierarchical.json игнорируем разделы sections.chunks,  chunks, toc_chunks

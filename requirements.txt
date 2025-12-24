@@ -6,3 +6,6 @@ docx2python>=1.0.0
 pathlib2>=2.3.7
 typing-extensions>=4.0.0
 beautifulsoup4>=4.12.0
+
+# Для работы с RAGAS конвертером
+langchain-core>=0.1.0
