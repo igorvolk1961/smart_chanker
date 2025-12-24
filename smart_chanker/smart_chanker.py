@@ -71,7 +71,8 @@ class SmartChanker:
                 "format": "json",
                 "save_path": "./output",
                 "save_docx2python_text": False,
-                "save_list_positions": False
+                "save_list_positions": False,
+                "save_table_json": False
             },
             "hierarchical_chunking": {
                 "enabled": False,
@@ -1651,8 +1652,9 @@ class SmartChanker:
                 self.logger.warning(f"Пропущена таблица {table_idx + 1}: отсутствует docx_table")
                 continue
             
-            # Временно сохраняем полный JSON результат преобразования таблицы (для отладки)
-            if output_dir and input_path:
+            # Сохраняем полный JSON результат преобразования таблицы (если включено в конфиге)
+            out_cfg = self.config.get("output", {})
+            if out_cfg.get("save_table_json", False) and output_dir and input_path:
                 try:
                     os.makedirs(output_dir, exist_ok=True)
                     base_name = Path(input_path).stem
