@@ -102,7 +102,6 @@ class HierarchicalChunker:
             'children': [child.number for child in section.children],
             'chunks': section.chunks,
             'tables': section.tables if hasattr(section, 'tables') and section.tables else [],
-            'paragraph_indices': section.paragraph_indices if hasattr(section, 'paragraph_indices') and section.paragraph_indices else None,
         }
     
     def _serialize_chunks(self, chunks: List[Chunk]) -> List[Dict[str, Any]]:
