@@ -20,6 +20,13 @@ except ImportError:
     DOCX2PYTHON_AVAILABLE = False
     logging.warning("Пакет docx2python не установлен")
 
+try:
+    from unstructured.partition.pdf import partition_pdf
+    UNSTRUCTURED_AVAILABLE = True
+except ImportError:
+    UNSTRUCTURED_AVAILABLE = False
+    logging.warning("Пакет unstructured не установлен")
+
 
 # Импорт внутренних модулей
 from .numbering_restorer import NumberingRestorer
@@ -140,7 +147,11 @@ class SmartChanker:
         """
         if not DOCX2PYTHON_AVAILABLE:
             self.logger.warning("Пакет docx2python недоступен")
-            self.logger.error("Для работы требуется пакет docx2python")
+            self.logger.error("Для работы с DOCX файлами требуется пакет docx2python")
+        
+        if not UNSTRUCTURED_AVAILABLE:
+            self.logger.warning("Пакет unstructured недоступен")
+            self.logger.warning("Для работы с PDF файлами требуется пакет unstructured")
     
     def process_folder(self, folder_path: str) -> Dict[str, Any]:
         """
@@ -195,7 +206,7 @@ class SmartChanker:
     
     def _get_files_to_process(self, folder_path: str) -> List[str]:
         """
-        Получение списка файлов для обработки (только DOCX/DOC)
+        Получение списка файлов для обработки (DOCX/DOC, TXT, MD, PDF)
         
         Args:
             folder_path: Путь к папке
@@ -203,7 +214,7 @@ class SmartChanker:
         Returns:
             Список путей к файлам
         """
-        supported_extensions = ['.docx', '.doc']
+        supported_extensions = ['.docx', '.doc', '.txt', '.md', '.pdf']
         files = []
         
         for root, dirs, filenames in os.walk(folder_path):
@@ -222,7 +233,7 @@ class SmartChanker:
     
     def _process_single_file(self, file_path: str) -> Dict[str, Any]:
         """
-        Обработка одного файла с использованием комбинированного подхода
+        Обработка одного файла с выбором метода обработки по формату
         
         Args:
             file_path: Путь к файлу
@@ -232,12 +243,18 @@ class SmartChanker:
         """
         file_ext = Path(file_path).suffix.lower()
         
-        # Проверяем поддержку формата
-        if file_ext not in ['.docx', '.doc']:
-            raise ValueError(f"Неподдерживаемый формат файла: {file_ext}. Поддерживаются только .docx и .doc")
-        
-        # Используем обработку через docx2python
-        return self._process_with_docx2python(file_path)
+        # Выбираем метод обработки по расширению файла
+        if file_ext in ['.docx', '.doc']:
+            return self._process_with_docx2python(file_path)
+        elif file_ext in ['.txt', '.md']:
+            return self._process_plain_text(file_path)
+        elif file_ext == '.pdf':
+            return self._process_pdf(file_path)
+        else:
+            raise ValueError(
+                f"Неподдерживаемый формат файла: {file_ext}. "
+                f"Поддерживаются: .docx, .doc, .txt, .md, .pdf"
+            )
     
     def _process_with_docx2python(self, file_path: str) -> Dict[str, Any]:
         """
@@ -304,6 +321,154 @@ class SmartChanker:
             "docx_tables_count": len(docx_tables),
             "toc_text": toc_text,  # Оглавление документа
         }
+    
+    def _process_plain_text(self, file_path: str) -> Dict[str, Any]:
+        """
+        Обработка плоского текстового файла (TXT, MD):
+        чтение файла с определением кодировки и разбиение на параграфы
+        
+        Args:
+            file_path: Путь к файлу
+            
+        Returns:
+            Результат обработки в формате, совместимом с _process_with_docx2python
+        """
+        self.logger.info(f"Обрабатываем файл как плоский текст: {file_path}")
+        
+        # Определяем кодировку и читаем файл
+        text_content = self._read_text_file_with_encoding(file_path)
+        
+        # Разбиваем на параграфы (по строкам)
+        lines = text_content.split('\n')
+        paragraphs = []
+        paragraphs_with_indices = []
+        
+        for line in lines:
+            line = line.rstrip()  # Убираем правые пробелы
+            if line.strip():  # Пропускаем пустые строки
+                para_dict = {
+                    'text': line,
+                    'restored_text': line,  # Для плоских файлов restored_text = text
+                }
+                paragraphs.append(para_dict)
+                paragraphs_with_indices.append(para_dict)
+        
+        # Извлекаем оглавление из параграфов
+        toc_text = self._extract_table_of_contents_from_paragraphs(paragraphs)
+        
+        # Формируем текст без таблиц (весь текст файла)
+        text_without_tables = text_content
+        
+        return {
+            "file_path": file_path,
+            "tool_used": "plain_text",
+            "text_without_tables": text_without_tables,
+            "paragraphs": paragraphs,
+            "paragraphs_with_indices": paragraphs_with_indices,
+            "paragraphs_count": len(paragraphs),
+            "tables_data": [],  # Таблицы не поддерживаются для плоских файлов
+            "table_replacements_count": 0,
+            "docx_tables_count": 0,
+            "toc_text": toc_text,
+        }
+    
+    def _process_pdf(self, file_path: str) -> Dict[str, Any]:
+        """
+        Обработка PDF файла с использованием unstructured:
+        простое извлечение текста без сохранения структуры таблиц
+        
+        Args:
+            file_path: Путь к PDF файлу
+            
+        Returns:
+            Результат обработки в формате, совместимом с _process_with_docx2python
+        """
+        if not UNSTRUCTURED_AVAILABLE:
+            raise ImportError("Для обработки PDF требуется пакет unstructured")
+        
+        self.logger.info(f"Обрабатываем PDF файл через unstructured: {file_path}")
+        
+        try:
+            # Извлекаем элементы из PDF (простой вариант - только текст)
+            elements = partition_pdf(
+                filename=file_path,
+                strategy="fast",  # Быстрая стратегия без OCR
+                infer_table_structure=False,  # Не извлекаем таблицы в простом варианте
+            )
+            
+            # Объединяем все текстовые элементы в параграфы
+            paragraphs = []
+            paragraphs_with_indices = []
+            text_parts = []
+            
+            for element in elements:
+                # Получаем текст из элемента
+                element_text = str(element).strip()
+                if element_text:
+                    text_parts.append(element_text)
+                    para_dict = {
+                        'text': element_text,
+                        'restored_text': element_text,  # Для PDF restored_text = text
+                    }
+                    paragraphs.append(para_dict)
+                    paragraphs_with_indices.append(para_dict)
+            
+            # Объединяем весь текст
+            text_without_tables = '\n'.join(text_parts)
+            
+            # Извлекаем оглавление из параграфов
+            toc_text = self._extract_table_of_contents_from_paragraphs(paragraphs)
+            
+            return {
+                "file_path": file_path,
+                "tool_used": "pdf",
+                "text_without_tables": text_without_tables,
+                "paragraphs": paragraphs,
+                "paragraphs_with_indices": paragraphs_with_indices,
+                "paragraphs_count": len(paragraphs),
+                "tables_data": [],  # Таблицы не извлекаются в простом варианте
+                "table_replacements_count": 0,
+                "docx_tables_count": 0,
+                "toc_text": toc_text,
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Ошибка при обработке PDF файла {file_path}: {e}")
+            raise ValueError(f"Не удалось обработать PDF файл: {e}") from e
+    
+    def _read_text_file_with_encoding(self, file_path: str) -> str:
+        """
+        Читает текстовый файл с автоматическим определением кодировки
+        
+        Args:
+            file_path: Путь к файлу
+            
+        Returns:
+            Содержимое файла как строка
+        """
+        # Список кодировок для попытки чтения
+        encodings = ['utf-8', 'cp1251', 'windows-1251', 'latin-1', 'iso-8859-1']
+        
+        for encoding in encodings:
+            try:
+                with open(file_path, 'r', encoding=encoding) as f:
+                    content = f.read()
+                self.logger.debug(f"Файл {file_path} успешно прочитан с кодировкой {encoding}")
+                return content
+            except UnicodeDecodeError:
+                continue
+            except Exception as e:
+                self.logger.warning(f"Ошибка при чтении файла {file_path} с кодировкой {encoding}: {e}")
+                continue
+        
+        # Если все попытки не удались, пробуем с ошибками
+        try:
+            with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+                content = f.read()
+            self.logger.warning(f"Файл {file_path} прочитан с заменой неверных символов (UTF-8)")
+            return content
+        except Exception as e:
+            raise ValueError(f"Не удалось прочитать файл {file_path}: {e}") from e
     
     def _extract_table_of_contents_from_paragraphs(self, paragraphs: List[Dict]) -> str:
         """
@@ -1001,26 +1166,35 @@ class SmartChanker:
     # ===== END-TO-END PIPELINE =====
     def run_end_to_end(self, input_path: str, output_dir: Optional[str] = None) -> Dict[str, Any]:
         """
-        Полная обработка одного исходного файла: DOC/DOCX -> плоский текст -> иерархический чанкинг
+        Полная обработка одного исходного файла: DOC/DOCX/TXT/MD/PDF -> плоский текст -> иерархический чанкинг
         Возвращает только итоговую структуру с sections/chunks/metadata без промежуточных полей.
         """
-        # 1) Извлечь плоский текст через docx2python
-        docx2python_result = self._process_with_docx2python(input_path)
-        text_without_tables = docx2python_result.get("text_without_tables", "")
+        # 1) Извлечь плоский текст (выбирает метод обработки по формату файла)
+        file_result = self._process_single_file(input_path)
+        text_without_tables = file_result.get("text_without_tables", "")
+        tool_used = file_result.get("tool_used", "")
 
         # Опционально сохраняем текст без таблиц
         out_cfg = self.config.get("output", {})
         if out_cfg.get("save_docx2python_text") and output_dir:
             try:
                 base_name = Path(input_path).stem
-                out_file = os.path.join(output_dir, f"{base_name}_docx2python.txt")
+                # Используем разные суффиксы в зависимости от инструмента
+                if tool_used == "docx2python":
+                    out_file = os.path.join(output_dir, f"{base_name}_docx2python.txt")
+                elif tool_used == "plain_text":
+                    out_file = os.path.join(output_dir, f"{base_name}_plain_text.txt")
+                elif tool_used == "pdf":
+                    out_file = os.path.join(output_dir, f"{base_name}_pdf.txt")
+                else:
+                    out_file = os.path.join(output_dir, f"{base_name}_extracted.txt")
                 with open(out_file, "w", encoding="utf-8") as f:
                     f.write(text_without_tables or "")
             except Exception as e:
                 self.logger.warning(f"Не удалось сохранить текст: {e}")
 
         # 1.5) Извлекаем оглавление из результата обработки
-        toc_text = docx2python_result.get("toc_text", "")
+        toc_text = file_result.get("toc_text", "")
         if output_dir and toc_text:
             try:
                 base_name = Path(input_path).stem
@@ -1030,9 +1204,10 @@ class SmartChanker:
             except Exception as e:
                 self.logger.warning(f"Не удалось сохранить оглавление: {e}")
 
-        # 1.6) Сохраняем параграфы с list_position (опционально)
+        # 1.6) Сохраняем параграфы с list_position (опционально, только для DOCX)
         out_cfg = self.config.get("output", {})
-        if (input_path.lower().endswith('.docx') and output_dir and 
+        file_ext = Path(input_path).suffix.lower()
+        if (file_ext in ['.docx', '.doc'] and output_dir and 
             out_cfg.get("save_list_positions", False)):
             try:
                 list_position_paragraphs = self._extract_list_position_paragraphs(input_path)
@@ -1052,7 +1227,7 @@ class SmartChanker:
         chunk_overlap_percent_table = hconf.get("chunk_overlap_percent_table", 0.0)
         
         # Получаем параграфы из результата обработки
-        paragraphs = docx2python_result.get("paragraphs", [])
+        paragraphs = file_result.get("paragraphs", [])
         
         # Парсим иерархию из списка параграфов
         from .hierarchy_parser import HierarchyParser
@@ -1086,8 +1261,8 @@ class SmartChanker:
             except Exception as e:
                 self.logger.warning(f"Не удалось обработать оглавление: {e}")
 
-        # 2.6) Создаем подразделы для таблиц в иерархии
-        tables_data = docx2python_result.get("tables_data", [])
+        # 2.6) Создаем подразделы для таблиц в иерархии (только для DOCX)
+        tables_data = file_result.get("tables_data", [])
         if tables_data:
             try:
                 # Используем исходные section_nodes напрямую, не сериализуя и не восстанавливая
