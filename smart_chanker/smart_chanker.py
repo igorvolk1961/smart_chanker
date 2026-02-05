@@ -79,7 +79,8 @@ class SmartChanker:
                 "save_path": "./output",
                 "save_docx2python_text": False,
                 "save_list_positions": False,
-                "save_table_json": False
+                "save_table_json": False,
+                "include_section_content": True  # Включать ли поле content в sections (для уменьшения размера можно установить False)
             },
             "hierarchical_chunking": {
                 "enabled": False,
@@ -338,6 +339,9 @@ class SmartChanker:
         # Определяем кодировку и читаем файл
         text_content = self._read_text_file_with_encoding(file_path)
         
+        # Очищаем непечатные символы и знаки вопроса в начале строк
+        text_content = self._clean_non_printable_chars(text_content)
+        
         # Разбиваем на параграфы (по строкам)
         lines = text_content.split('\n')
         paragraphs = []
@@ -447,7 +451,8 @@ class SmartChanker:
             Содержимое файла как строка
         """
         # Список кодировок для попытки чтения
-        encodings = ['utf-8', 'cp1251', 'windows-1251', 'latin-1', 'iso-8859-1']
+        # utf-8-sig автоматически удаляет BOM при чтении
+        encodings = ['utf-8-sig', 'utf-8', 'cp1251', 'windows-1251', 'latin-1', 'iso-8859-1']
         
         for encoding in encodings:
             try:
@@ -469,6 +474,54 @@ class SmartChanker:
             return content
         except Exception as e:
             raise ValueError(f"Не удалось прочитать файл {file_path}: {e}") from e
+    
+    def _clean_non_printable_chars(self, text: str) -> str:
+        """
+        Очищает текст от непечатных символов, которые могут мешать распознаванию нумерации.
+        Также удаляет знаки вопроса "?" в начале строк (результат замены непечатных символов).
+        
+        Args:
+            text: Исходный текст
+            
+        Returns:
+            Очищенный текст
+        """
+        import unicodedata
+        
+        # Удаляем BOM из начала текста
+        text = text.lstrip('\ufeff')
+        
+        # Разбиваем на строки для обработки
+        lines = text.split('\n')
+        cleaned_lines = []
+        
+        for line in lines:
+            # Удаляем непечатные символы из строки (кроме пробелов и табуляции)
+            # Сохраняем пробелы и табуляцию для правильного распознавания отступов
+            result = []
+            for char in line:
+                category = unicodedata.category(char)
+                # Пропускаем обычные печатные символы
+                if category[0] in ['L', 'N', 'P', 'S', 'Z']:  # Letter, Number, Punctuation, Symbol, Separator
+                    result.append(char)
+                # Пропускаем табуляцию и переносы строк
+                elif char in ['\t', '\n', '\r']:
+                    result.append(char)
+                # Пропускаем обычные пробелы
+                elif char == ' ':
+                    result.append(char)
+                # Все остальное (непечатные символы) пропускаем
+                # else: не добавляем
+            
+            cleaned_line = ''.join(result)
+            
+            # Удаляем знаки вопроса "?" в начале строки (результат замены непечатных символов)
+            # Используем lstrip для удаления всех "?" в начале строки
+            cleaned_line = cleaned_line.lstrip('?')
+            
+            cleaned_lines.append(cleaned_line)
+        
+        return '\n'.join(cleaned_lines)
     
     def _extract_table_of_contents_from_paragraphs(self, paragraphs: List[Dict]) -> str:
         """
@@ -1242,8 +1295,13 @@ class SmartChanker:
         # Сериализуем результат
         from .hierarchical_chunker import HierarchicalChunker
         chunker = HierarchicalChunker()
+        
+        # Получаем параметр включения content из конфигурации
+        out_cfg = self.config.get("output", {})
+        include_section_content = out_cfg.get("include_section_content", True)
+        
         process_result = {
-            "sections": chunker._serialize_sections(section_nodes),
+            "sections": chunker._serialize_sections(section_nodes, include_content=include_section_content),
             "chunks": chunker._serialize_chunks(chunks),
             "metadata": {
                 "total_sections": len(section_nodes),
@@ -1607,7 +1665,12 @@ class SmartChanker:
         # Используем исходные section_nodes, которые уже содержат добавленные подразделы таблиц
         from .hierarchical_chunker import HierarchicalChunker
         chunker = HierarchicalChunker()
-        process_result["sections"] = chunker._serialize_sections(section_nodes)
+        
+        # Получаем параметр включения content из конфигурации
+        out_cfg = self.config.get("output", {})
+        include_section_content = out_cfg.get("include_section_content", True)
+        
+        process_result["sections"] = chunker._serialize_sections(section_nodes, include_content=include_section_content)
         
         # НЕ перегенерируем чанки, так как:
         # 1. Подразделы таблиц - это только структурные элементы, их content ("Таблица N. Название") не должен быть отдельным чанком

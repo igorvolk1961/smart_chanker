@@ -54,9 +54,15 @@ class HierarchicalChunker:
             target_level=self.config.get('target_level', 3)
         )
         
+        # Получаем параметр включения content из конфигурации
+        include_content = self.config.get('include_section_content', True)
+        # Также проверяем вложенную структуру output.include_section_content
+        if 'output' in self.config and 'include_section_content' in self.config['output']:
+            include_content = self.config['output']['include_section_content']
+        
         # Создаем результат
         result = {
-            'sections': self._serialize_sections(sections),
+            'sections': self._serialize_sections(sections, include_content=include_content),
             'chunks': self._serialize_chunks(chunks),
             'metadata': {
                 'total_sections': len(sections),
@@ -68,41 +74,48 @@ class HierarchicalChunker:
         
         return result
     
-    def _serialize_sections(self, sections: List[SectionNode]) -> List[Dict[str, Any]]:
+    def _serialize_sections(self, sections: List[SectionNode], include_content: bool = True) -> List[Dict[str, Any]]:
         """
         Сериализует разделы в словари
         
         Args:
             sections: Список разделов
+            include_content: Включать ли поле content в сериализацию
             
         Returns:
             Список словарей с данными разделов
         """
         result = []
         for section in sections:
-            result.append(self._serialize_section(section))
+            result.append(self._serialize_section(section, include_content=include_content))
         return result
     
-    def _serialize_section(self, section: SectionNode) -> Dict[str, Any]:
+    def _serialize_section(self, section: SectionNode, include_content: bool = True) -> Dict[str, Any]:
         """
         Сериализует один раздел в словарь
         
         Args:
             section: Раздел для сериализации
+            include_content: Включать ли поле content в сериализацию
             
         Returns:
             Словарь с данными раздела
         """
-        return {
+        result = {
             'number': section.number,
             'title': section.title,
             'level': section.level,
-            'content': section.content,
             'parent_number': section.parent.number if section.parent else None,
             'children': [child.number for child in section.children],
             'chunks': section.chunks,
             'tables': section.tables if hasattr(section, 'tables') and section.tables else [],
         }
+        
+        # Условно добавляем content в зависимости от параметра
+        if include_content:
+            result['content'] = section.content
+        
+        return result
     
     def _serialize_chunks(self, chunks: List[Chunk]) -> List[Dict[str, Any]]:
         """
@@ -187,11 +200,16 @@ class HierarchicalChunker:
         if not target_section:
             return {'error': f'Section {section_number} not found'}
         
+        # Получаем параметр включения content из конфигурации
+        include_content = self.config.get('include_section_content', True)
+        if 'output' in self.config and 'include_section_content' in self.config['output']:
+            include_content = self.config['output']['include_section_content']
+        
         context = {
-            'section': self._serialize_section(target_section),
-            'parent': self._serialize_section(target_section.parent) if target_section.parent else None,
-            'children': [self._serialize_section(child) for child in target_section.children],
-            'siblings': self._get_sibling_sections(target_section)
+            'section': self._serialize_section(target_section, include_content=include_content),
+            'parent': self._serialize_section(target_section.parent, include_content=include_content) if target_section.parent else None,
+            'children': [self._serialize_section(child, include_content=include_content) for child in target_section.children],
+            'siblings': self._get_sibling_sections(target_section, include_content=include_content)
         }
         
         return context
@@ -219,12 +237,13 @@ class HierarchicalChunker:
         
         return None
     
-    def _get_sibling_sections(self, section: SectionNode) -> List[Dict[str, Any]]:
+    def _get_sibling_sections(self, section: SectionNode, include_content: bool = True) -> List[Dict[str, Any]]:
         """
         Получает соседние разделы
         
         Args:
             section: Раздел для поиска соседей
+            include_content: Включать ли поле content в сериализацию
             
         Returns:
             Список соседних разделов
@@ -235,7 +254,7 @@ class HierarchicalChunker:
         siblings = []
         for child in section.parent.children:
             if child.number != section.number:
-                siblings.append(self._serialize_section(child))
+                siblings.append(self._serialize_section(child, include_content=include_content))
         
         return siblings
     
