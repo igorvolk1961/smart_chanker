@@ -276,14 +276,11 @@ class SmartChanker:
         # Извлекаем таблицы из DOCX
         docx_tables = self.table_processor.extract_docx_tables(file_path)
         
-        # Извлекаем параграфы из docx2python с индексами и list_position
-        paragraphs_with_indices, tables_info = self._extract_paragraphs_from_docx2python_with_list_position(
+        # Извлекаем, фильтруем параграфы, восстанавливаем нумерацию и определяем таблицы за один проход
+        filtered_paragraphs, restored_paragraphs_list, tables_data = self._extract_and_process_paragraphs_from_docx2python(
             file_path,
             docx_tables,
         )
-        
-        # Восстанавливаем нумерацию в списке параграфов
-        filtered_paragraphs, restored_paragraphs_list = self.numbering_restorer.restore_numbering_in_paragraphs_list(paragraphs_with_indices)
         
         # Извлекаем оглавление из параграфов с восстановленной нумерацией
         toc_text = self._extract_table_of_contents_from_paragraphs(filtered_paragraphs)
@@ -291,23 +288,14 @@ class SmartChanker:
         # Формируем текст без таблиц для обратной совместимости
         text_without_tables = '\n'.join(restored_paragraphs_list)
         
-        # Формируем tables_data с индексами параграфов
-        # table_index не нужен - используем позицию в списке
-        tables_data = []
-        for table_info_item in tables_info:
-            tables_data.append({
-                'paragraph_index_before': table_info_item['paragraph_index_before'],
-                'docx_table': table_info_item.get('docx_table'),
-            })
-        
         return {
             "file_path": file_path,
             "tool_used": "docx2python",
             "text_without_tables": text_without_tables,  # Текст без таблиц (для отладки/совместимости)
             "paragraphs": filtered_paragraphs,  # Основной формат: список словарей с индексами и list_position (отфильтрованный)
             "paragraphs_count": len(filtered_paragraphs),
-            "tables_data": tables_data,  # Информация о таблицах с индексами параграфов (индексы относятся к paragraphs_with_indices)
-            "table_replacements_count": len(tables_info),
+            "tables_data": tables_data,  # Информация о таблицах с индексами параграфов (индексы относятся к отфильтрованному списку)
+            "table_replacements_count": len(tables_data),
             "docx_tables_count": len(docx_tables),
             "toc_text": toc_text,  # Оглавление документа
         }
@@ -701,6 +689,175 @@ class SmartChanker:
             })
         
         return chunks
+    
+    def _extract_and_process_paragraphs_from_docx2python(
+        self,
+        file_path: str,
+        docx_tables: List[ParsedDocxTable],
+    ) -> tuple[List[Dict], List[str], List[Dict]]:
+        """
+        Извлекает параграфы из docx2python, фильтрует их, восстанавливает нумерацию
+        и определяет позиции таблиц за один проход.
+        
+        Args:
+            file_path: Путь к DOCX файлу
+            docx_tables: Список таблиц, извлеченных из DOCX
+            
+        Returns:
+            Кортеж: (отфильтрованные параграфы, список восстановленных текстов, данные о таблицах с правильными индексами)
+        """
+        if not DOCX2PYTHON_AVAILABLE:
+            raise ImportError("Пакет docx2python недоступен")
+        
+        import re
+        
+        filtered_paragraphs: List[Dict] = []
+        restored_paragraphs_list: List[str] = []
+        tables_data: List[Dict] = []
+        
+        # Извлекаем параграфы из docx2python
+        doc = docx2python(file_path)
+        docx2python_paragraphs = self._extract_all_paragraphs(doc.document_pars)
+        
+        self.logger.debug(f"_extract_and_process: Всего параграфов из docx2python: {len(docx2python_paragraphs)}")
+        
+        # Контекст для восстановления нумерации
+        numbering_context = {
+            'last_upper_level': None,
+            'hierarchy_stack': []
+        }
+        
+        # Состояние для определения таблиц
+        paragraph_index = -1  # Индекс в отфильтрованном списке
+        current_table_index = -1  # Индекс текущей таблицы (-1 означает "не в таблице")
+        table_start_paragraph = -1  # Индекс параграфа, где началась текущая таблица
+        
+        for par in docx2python_paragraphs:
+            # Извлекаем текст параграфа
+            para_text = ""
+            if hasattr(par, 'runs'):
+                for run in par.runs:
+                    para_text += run.text if hasattr(run, 'text') else str(run)
+            
+            # Фильтруем пустые параграфы
+            if not para_text.strip():
+                continue
+            
+            # Получаем list_position
+            list_position = None
+            if hasattr(par, 'list_position'):
+                list_position = par.list_position
+            
+            # Проверяем, является ли параграф частью таблицы, используя lineage
+            is_in_table = False
+            if hasattr(par, 'lineage') and par.lineage:
+                lineage = par.lineage
+                if len(lineage) >= 2 and lineage[1] == "tbl":
+                    is_in_table = True
+            
+            # Если мы вышли из таблицы (были в таблице, но теперь не в таблице)
+            if current_table_index >= 0 and not is_in_table:
+                # Сохраняем информацию о таблице
+                paragraph_before = table_start_paragraph
+                
+                docx_table = None
+                if current_table_index < len(docx_tables):
+                    docx_table = docx_tables[current_table_index]
+                
+                tables_data.append({
+                    'paragraph_index_before': paragraph_before,  # Уже правильный индекс в отфильтрованном списке!
+                    'docx_table': docx_table,
+                })
+                
+                current_table_index = -1
+                table_start_paragraph = -1
+            
+            # Обрабатываем параграф только если он не в таблице
+            if not is_in_table:
+                # Восстанавливаем нумерацию
+                restored_numbering = None
+                if list_position:
+                    restored_numbering = self.numbering_restorer._restore_numbering_from_list_position(
+                        list_position, para_text, numbering_context
+                    )
+                
+                restored_text = None
+                
+                # Если удалось восстановить через list_position
+                if restored_numbering:
+                    # Удаляем старую нумерацию и добавляем новую
+                    content = re.sub(r'^\s*\d+(?:\.\d+)*[\.\)]\s*', '', para_text)
+                    
+                    # Проверяем, содержит ли префикс дефис, заканчивающийся на "-\t"
+                    if re.match(r'^\s*-+\t', content):
+                        # Если префикс содержит "-", заменяем весь префикс на "-" и оставляем как есть
+                        content = re.sub(r'^\s*-+\t', '-\t', content)
+                        restored_text = content
+                    else:
+                        # ВАЖНО: пропускаем параграфы без текста после удаления нумерации
+                        if not content.strip():
+                            continue  # Пропускаем этот параграф полностью
+                        restored_text = f"{restored_numbering} {content}"
+                    
+                    # Обновляем контекст
+                    if restored_text and '.' in restored_numbering:
+                        numbering_context['last_upper_level'] = restored_numbering.split('.')[0]
+                else:
+                    # Fallback: проверяем явные заголовки (1.2.3. Текст)
+                    explicit_header = re.match(r'^\s*(\d+(?:\.\d+)*)\.(\s*)(.*)$', para_text)
+                    if explicit_header:
+                        header_path = [int(x) for x in explicit_header.group(1).split('.')]
+                        header_text = explicit_header.group(3)
+                        restored_text = f"{'.'.join(map(str, header_path))}. {header_text}"
+                    else:
+                        # Если не удалось восстановить нумерацию, добавляем как есть
+                        restored_text = para_text
+                
+                # Добавляем параграф в отфильтрованный список
+                paragraph_index += 1
+                filtered_paragraphs.append({
+                    'text': para_text,
+                    'list_position': list_position,
+                    'restored_text': restored_text
+                })
+                restored_paragraphs_list.append(restored_text)
+            
+            # Если мы вошли в таблицу (не были в таблице, но теперь в таблице)
+            # ВАЖНО: проверяем ПОСЛЕ обработки параграфа, чтобы table_start_paragraph указывал на правильный индекс
+            if current_table_index < 0 and is_in_table:
+                # Находим индекс таблицы - ищем следующую необработанную таблицу
+                current_table_index = len(tables_data)
+                # table_start_paragraph - это индекс последнего добавленного параграфа (который был перед таблицей)
+                table_start_paragraph = paragraph_index
+        
+        # Если документ заканчивается таблицей
+        if current_table_index >= 0:
+            paragraph_before = table_start_paragraph
+            
+            docx_table = None
+            if current_table_index < len(docx_tables):
+                docx_table = docx_tables[current_table_index]
+            
+            tables_data.append({
+                'paragraph_index_before': paragraph_before,
+                'docx_table': docx_table,
+            })
+            self.logger.debug(f"Сохранена информация о последней таблице: paragraph_index_before={paragraph_before}")
+        
+        doc.close()
+        
+        self.logger.debug(f"_extract_and_process: Итого отфильтрованных параграфов: {len(filtered_paragraphs)}")
+        self.logger.debug(f"_extract_and_process: Итого таблиц: {len(tables_data)}")
+        for i, table_info in enumerate(tables_data):
+            para_idx = table_info.get('paragraph_index_before', -1)
+            self.logger.debug(f"_extract_and_process: Таблица {i+1}: paragraph_index_before={para_idx}")
+            if para_idx >= 0 and para_idx < len(filtered_paragraphs):
+                para_text = filtered_paragraphs[para_idx].get('restored_text', filtered_paragraphs[para_idx].get('text', ''))[:50]
+                self.logger.debug(f"_extract_and_process:   Параграф перед таблицей: '{para_text}...'")
+            else:
+                self.logger.warning(f"_extract_and_process:   paragraph_index_before={para_idx} выходит за границы массива len={len(filtered_paragraphs)}")
+        
+        return filtered_paragraphs, restored_paragraphs_list, tables_data
     
     def _extract_paragraphs_from_docx2python_with_list_position(
         self,
