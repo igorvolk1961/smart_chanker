@@ -282,18 +282,8 @@ class SmartChanker:
             docx_tables,
         )
         
-        # НЕ фильтруем названия таблиц - оставляем их в тексте для упрощения логики
-        # Параграфы внутри таблиц уже не попали в paragraphs_with_indices на этапе извлечения
-        # Используем paragraphs_with_indices как есть
-        filtered_paragraphs = paragraphs_with_indices
-        
         # Восстанавливаем нумерацию в списке параграфов
-        restored_paragraphs_list = self.numbering_restorer.restore_numbering_in_paragraphs_list(filtered_paragraphs)
-        
-        # Обновляем restored_text в параграфах
-        for i, para in enumerate(filtered_paragraphs):
-            if i < len(restored_paragraphs_list):
-                para['restored_text'] = restored_paragraphs_list[i]
+        filtered_paragraphs, restored_paragraphs_list = self.numbering_restorer.restore_numbering_in_paragraphs_list(paragraphs_with_indices)
         
         # Извлекаем оглавление из параграфов с восстановленной нумерацией
         toc_text = self._extract_table_of_contents_from_paragraphs(filtered_paragraphs)
@@ -315,7 +305,6 @@ class SmartChanker:
             "tool_used": "docx2python",
             "text_without_tables": text_without_tables,  # Текст без таблиц (для отладки/совместимости)
             "paragraphs": filtered_paragraphs,  # Основной формат: список словарей с индексами и list_position (отфильтрованный)
-            "paragraphs_with_indices": paragraphs_with_indices,  # Исходный массив параграфов с индексами (для работы с таблицами)
             "paragraphs_count": len(filtered_paragraphs),
             "tables_data": tables_data,  # Информация о таблицах с индексами параграфов (индексы относятся к paragraphs_with_indices)
             "table_replacements_count": len(tables_info),
@@ -742,7 +731,7 @@ class SmartChanker:
         self.logger.debug(f"_extract_paragraphs: Всего параграфов из docx2python: {len(docx2python_paragraphs)}")
         
         # Обрабатываем параграфы и определяем позиции таблиц
-        paragraph_index = 0
+        paragraph_index = -1
         current_table_index = -1  # Индекс текущей таблицы (-1 означает "не в таблице")
         table_start_paragraph = -1  # Индекс параграфа, где началась текущая таблица
         
@@ -780,20 +769,7 @@ class SmartChanker:
                 paragraph_before = table_start_paragraph
                 # paragraph_after - индекс первого параграфа после таблицы
                 # Текущий параграф (после таблицы) уже добавлен, поэтому paragraph_index указывает на его индекс
-                paragraph_after = paragraph_index
-                
-                # Проверяем, что разница между after и before равна 1
-                # Это должно быть так, потому что параграфы внутри таблиц не добавляются в paragraphs_with_indices
-                if paragraph_before >= 0 and paragraph_after >= 0:
-                    diff = paragraph_after - paragraph_before
-                    if diff != 1:
-                        raise ValueError(
-                            f"Ошибка определения границ таблицы {current_table_index + 1}: "
-                            f"разница между paragraph_index_before ({paragraph_before}) и "
-                            f"paragraph_index_after ({paragraph_after}) равна {diff}, ожидается 1. "
-                            f"Возможно, параграфы внутри таблицы не были правильно определены через lineage."
-                        )
-                
+
                 docx_table = None
                 if current_table_index < len(docx_tables):
                     docx_table = docx_tables[current_table_index]
@@ -823,33 +799,13 @@ class SmartChanker:
                 # Находим индекс таблицы - ищем следующую необработанную таблицу
                 current_table_index = len(tables_info)
                 # table_start_paragraph - это индекс последнего добавленного параграфа (который был перед таблицей)
-                # paragraph_index уже увеличен на 1 после добавления параграфа, поэтому используем paragraph_index - 1
-                # Но если paragraph_index = 0 (таблица в самом начале), то table_start_paragraph = -1
-                table_start_paragraph = paragraph_index - 1 if paragraph_index > 0 else -1
+                table_start_paragraph = paragraph_index
         
-        # Если документ заканчивается таблицей, нужно сохранить информацию о последней таблице
         if current_table_index >= 0:
             # paragraph_before - индекс последнего параграфа перед таблицей
             # table_start_paragraph уже установлен как индекс последнего параграфа перед таблицей
             paragraph_before = table_start_paragraph
-            # paragraph_after - индекс первого параграфа после таблицы
-            # Если документ заканчивается таблицей, то paragraph_after = paragraph_index (конец списка)
-            paragraph_after = paragraph_index
-            
-            # Проверяем, что paragraph_before не выходит за границы массива
-            if paragraph_before >= len(paragraphs_with_indices):
-                self.logger.warning(f"Исправляем paragraph_before={paragraph_before} на последний доступный индекс={len(paragraphs_with_indices) - 1}")
-                paragraph_before = len(paragraphs_with_indices) - 1 if len(paragraphs_with_indices) > 0 else -1
-            
-            # Проверяем, что разница между after и before равна 1
-            if paragraph_before >= 0 and paragraph_after >= 0:
-                diff = paragraph_after - paragraph_before
-                if diff != 1:
-                    self.logger.warning(
-                        f"Разница между paragraph_index_before ({paragraph_before}) и "
-                        f"paragraph_index_after ({paragraph_after}) равна {diff}, ожидается 1 для последней таблицы {current_table_index + 1}"
-                    )
-            
+
             docx_table = None
             if current_table_index < len(docx_tables):
                 docx_table = docx_tables[current_table_index]

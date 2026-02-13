@@ -113,23 +113,27 @@ class NumberingRestorer:
         Returns:
             List[str]: список параграфов с восстановленной нумерацией
         """
-        restored_paragraphs = []
+        filtered_paragraphs = []
+        restored_paragraphs_list = []
+
         context = {
             'last_upper_level': None,
             'hierarchy_stack': []
         }
-        
+
         for i, paragraph in enumerate(paragraphs):
             # Работаем только со словарями
             if not isinstance(paragraph, dict):
                 continue
-            
+
             paragraph_text = paragraph.get('text', '')
-            list_position = paragraph.get('list_position')
-            
+
             if not paragraph_text.strip():
                 continue
-            
+
+            paragraph_text = paragraph.get('text', '')
+            list_position = paragraph.get('list_position')
+
             # Пытаемся восстановить нумерацию используя list_position
             restored_numbering = None
             if list_position:
@@ -146,17 +150,18 @@ class NumberingRestorer:
                 if re.match(r'^\s*-+\t', content):
                     # Если префикс содержит "-", заменяем весь префикс на "-" и оставляем как есть
                     content = re.sub(r'^\s*-+\t', '-\t', content)
-                    restored_paragraphs.append(content)
+                    paragraph['restored_text'] = content
+                    filtered_paragraphs.append(paragraph)
+                    restored_paragraphs_list.append(content)
                     continue
                 
-                # Пропускаем скрытые параграфы из Word (только номер и табуляция, без текста)
-                # Такие параграфы создают пустые разделы и дубликаты
                 if not content.strip():
                     continue
-                
                 restored_text = f"{restored_numbering} {content}"
-                restored_paragraphs.append(restored_text)
-                
+                paragraph['restored_text'] = restored_text
+                filtered_paragraphs.append(paragraph)
+                restored_paragraphs_list.append(restored_text)
+
                 # Обновляем контекст
                 if '.' in restored_numbering:
                     context['last_upper_level'] = restored_numbering.split('.')[0]
@@ -169,13 +174,17 @@ class NumberingRestorer:
                 header_text = explicit_header.group(3)
                 
                 restored_text = f"{'.'.join(map(str, header_path))}. {header_text}"
-                restored_paragraphs.append(restored_text)
+                paragraph['restored_text'] = restored_text
+                filtered_paragraphs.append(paragraph)
+                restored_paragraphs_list.append(restored_text)
                 continue
             
             # Если не удалось восстановить нумерацию, добавляем как есть
-            restored_paragraphs.append(paragraph_text)
-        
-        return restored_paragraphs
+            paragraph['restored_text'] = paragraph_text
+            filtered_paragraphs.append(paragraph)
+            restored_paragraphs_list.append(paragraph_text)
+
+        return filtered_paragraphs, restored_paragraphs_list
     
     def _restore_numbering_from_list_position(self, list_position: Tuple, paragraph_text: str, context: Dict) -> Optional[str]:
         """
