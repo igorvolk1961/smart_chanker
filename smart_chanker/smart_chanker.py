@@ -1692,6 +1692,9 @@ class SmartChanker:
             paragraphs_with_indices = paragraphs
         paragraphs_for_name = paragraphs_with_indices
         
+        # Строим словарь параграф -> раздел один раз перед циклом
+        paragraph_to_section = self._build_paragraph_to_section_map(section_nodes)
+        
         # Создаем подразделы для таблиц
         for table_idx, table_data in enumerate(tables_data):
             paragraph_index_before_original = table_data.get('paragraph_index_before', -1)
@@ -1742,10 +1745,9 @@ class SmartChanker:
                     continue
             
             # Находим раздел по индексу параграфа перед таблицей
-            # Для проверки раздела из номера параграфа таблицы нужно вычесть 1
-            search_paragraph_index = paragraph_index_before_original - 1
+            search_paragraph_index = paragraph_index_before_original
             self.logger.debug(f"Поиск раздела для таблицы {table_idx + 1}: paragraph_index_before_original={paragraph_index_before_original}, search_paragraph_index={search_paragraph_index}")
-            parent_node = self._find_section_by_paragraph_index(section_nodes, search_paragraph_index)
+            parent_node = self._find_section_by_paragraph_index(section_nodes, search_paragraph_index, paragraph_to_section)
             
             # Сохраняем table_name в данных таблицы всегда (даже если раздел не найден)
             table_data['table_name'] = table_name or f"Таблица {table_idx + 1}"
@@ -1838,47 +1840,73 @@ class SmartChanker:
         
         return root_nodes
     
+    def _build_paragraph_to_section_map(
+        self,
+        section_nodes: List['SectionNode'],
+    ) -> Dict[int, 'SectionNode']:
+        """
+        Строит словарь: индекс параграфа -> наименьший раздел, содержащий этот параграф
+        
+        Args:
+            section_nodes: Список всех разделов
+            
+        Returns:
+            Словарь {paragraph_index: SectionNode}
+        """
+        from .hierarchy_parser import SectionNode
+        from typing import Dict
+        
+        # Строим словарь: для каждого параграфа записываем наименьший раздел
+        # Разделы уже отсортированы по начальному индексу (first_idx) по возрастанию
+        # Так как параграфы меньшего размера всегда начинаются позже включающих их параграфов,
+        # достаточно просто перезаписывать значения при появлении нового диапазона индексов
+        paragraph_to_section = {}
+        
+        for section in section_nodes:
+            if not section.paragraph_indices:
+                continue
+                
+            first_idx, last_idx = section.paragraph_indices
+            
+            # Для каждого параграфа в диапазоне записываем или перезаписываем раздел
+            # Более поздние разделы (с большим first_idx) будут более специфичными
+            # и просто перезапишут предыдущие значения
+            for para_idx in range(first_idx, last_idx + 1):
+                paragraph_to_section[para_idx] = section
+        
+        return paragraph_to_section
+    
     def _find_section_by_paragraph_index(
         self,
         section_nodes: List['SectionNode'],
         paragraph_index: int,
+        paragraph_to_section: Dict[int, 'SectionNode'],
     ) -> Optional['SectionNode']:
         """
         Находит раздел, который содержит параграф с указанным индексом
         
+        Использует оптимизированный алгоритм: использует переданный словарь параграф -> раздел
+        для быстрого поиска.
+        
         Args:
-            section_nodes: Список корневых разделов
+            section_nodes: Список всех разделов
             paragraph_index: Индекс параграфа
+            paragraph_to_section: Словарь {paragraph_index: SectionNode}, должен быть построен заранее.
             
         Returns:
             SectionNode или None
         """
         from .hierarchy_parser import SectionNode
-        from typing import Optional
+        from typing import Optional, Dict
         
-        def search_recursive(node: 'SectionNode') -> Optional['SectionNode']:
-            # Проверяем, содержит ли раздел этот индекс параграфа
-            if hasattr(node, 'paragraph_indices') and node.paragraph_indices:
-                first_idx, last_idx = node.paragraph_indices
-                self.logger.debug(f"_find_section_by_paragraph_index: проверяем раздел '{node.number}' ({node.title[:30]}...), paragraph_indices=({first_idx}, {last_idx}), ищем индекс {paragraph_index}")
-                if first_idx <= paragraph_index <= last_idx:
-                    self.logger.debug(f"_find_section_by_paragraph_index: найден раздел '{node.number}' для индекса {paragraph_index}")
-                    return node
-            
-            # Рекурсивно ищем в дочерних разделах
-            for child in node.children:
-                result = search_recursive(child)
-                if result:
-                    return result
-            
-            return None
+        self.logger.debug(f"_find_section_by_paragraph_index: ищем раздел для paragraph_index={paragraph_index}, всего разделов: {len(section_nodes)}")
         
-        self.logger.debug(f"_find_section_by_paragraph_index: ищем раздел для paragraph_index={paragraph_index}, всего корневых разделов: {len(section_nodes)}")
-        # Ищем во всех корневых разделах
-        for root_node in section_nodes:
-            result = search_recursive(root_node)
-            if result:
-                return result
+        # Ищем раздел в словаре
+        section = paragraph_to_section.get(paragraph_index)
+        
+        if section:
+            self.logger.debug(f"_find_section_by_paragraph_index: найден раздел '{section.number}' для индекса {paragraph_index}")
+            return section
         
         self.logger.debug(f"_find_section_by_paragraph_index: раздел для paragraph_index={paragraph_index} не найден")
         return None
