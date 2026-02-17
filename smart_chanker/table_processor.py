@@ -187,16 +187,48 @@ class TableProcessor:
             return ""
         return "".join(t.text or "" for t in texts)
     
-    def docx_table_to_json(self, docx_table: ParsedDocxTable, table_name: str) -> str:
+    def has_merged_cells(self, docx_table: ParsedDocxTable) -> bool:
         """
-        Конвертация таблицы, извлеченной из DOCX, в JSON структуру фактов
+        Проверяет, есть ли в таблице объединенные ячейки
+        
+        Args:
+            docx_table: Распарсенная таблица
+            
+        Returns:
+            True если есть объединенные ячейки, False иначе
+        """
+        if not docx_table or not docx_table.grid:
+            return False
+        
+        # Собираем уникальные ячейки (по координатам row, col)
+        seen_cells = set()
+        for row in docx_table.grid:
+            for cell in row:
+                if cell is None:
+                    continue
+                # Используем координаты ячейки как ключ уникальности
+                cell_key = (cell.row, cell.col)
+                if cell_key in seen_cells:
+                    continue
+                seen_cells.add(cell_key)
+                
+                # Проверяем наличие объединений
+                if cell.rowspan > 1 or cell.colspan > 1:
+                    return True
+        
+        return False
+    
+    def _docx_table_to_complex_json(self, docx_table: ParsedDocxTable, table_name: str) -> str:
+        """
+        Конвертация таблицы с объединенными ячейками в сложный JSON формат
+        Использует структуру с attributes/facts/items для поддержки сложных таблиц
         
         Args:
             docx_table: Распарсенная таблица
             table_name: Название таблицы
             
         Returns:
-            JSON строка с описанием таблицы
+            JSON строка с описанием таблицы в сложном формате
             
         Raises:
             TableConversionError: Если не удалось конвертировать таблицу
@@ -331,24 +363,17 @@ class TableProcessor:
         except Exception as e:
             raise TableConversionError(f"Ошибка конвертации таблицы: {e}") from e
     
-    def docx_table_to_chunks(
-        self, 
-        docx_table: ParsedDocxTable, 
-        table_name: str, 
-        max_chunk_size: int = 1000,
-        chunk_overlap_size: int = 0
-    ) -> List[str]:
+    def docx_table_to_simple_json(self, docx_table: ParsedDocxTable, table_name: str) -> str:
         """
-        Конвертация таблицы в список чанков с группировкой по items
-        В чанк попадает целое число элементов items, кроме случаев, когда длина одного item превышает размер чанка
+        Конвертация плоской таблицы (без объединенных ячеек) в упрощенный JSON формат
+        Использует структуру с items, но facts представлен как объект (ключ - название колонки, значение - значение ячейки)
         
         Args:
             docx_table: Распарсенная таблица
             table_name: Название таблицы
-            max_chunk_size: Максимальный размер чанка в символах
             
         Returns:
-            Список JSON строк с чанками таблицы в формате table2.json
+            JSON строка с описанием таблицы в упрощенном формате
             
         Raises:
             TableConversionError: Если не удалось конвертировать таблицу
@@ -368,7 +393,183 @@ class TableProcessor:
             column_attribute_columns = analysis["column_attribute_columns"]
             global_attrs_by_row = analysis["global_attrs_by_row"]
 
-            # Группируем факты по строкам (items) - используем ту же логику, что и в docx_table_to_json
+            # Определяем названия колонок из заголовков
+            # Для простых таблиц (без объединенных ячеек) просто берем первую строку как заголовки
+            column_names: Dict[int, str] = {}
+            header_row_idx = 0
+            if row_attribute_rows:
+                # Если есть строки-атрибуты, используем первую из них как заголовки
+                header_row_idx = min(row_attribute_rows)
+            
+            for col_idx in range(docx_table.cols):
+                if col_idx in column_attribute_columns:
+                    continue
+                cell = grid[header_row_idx][col_idx]
+                if cell and cell.text and cell.text.strip():
+                    column_names[col_idx] = cell.text.strip()
+                else:
+                    # Если заголовок пустой, используем номер колонки
+                    column_names[col_idx] = f"Колонка {col_idx + 1}"
+
+            # Группируем факты по строкам (items)
+            items: List[Dict[str, Any]] = []
+            
+            for row_idx in range(docx_table.rows):
+                if row_idx in row_attribute_rows:
+                    continue
+                
+                # Определяем item_name из колонки-атрибута строки
+                item_name: Optional[str] = None
+                for col_idx in sorted(column_attribute_columns, reverse=True):
+                    cell = grid[row_idx][col_idx]
+                    if cell and cell.text and cell.text.strip():
+                        item_name = cell.text.strip()
+                        break
+                
+                # Если не нашли в колонках-атрибутах, ищем в первой колонке данных строки
+                if not item_name:
+                    for col_idx in range(docx_table.cols):
+                        if col_idx in column_attribute_columns:
+                            continue
+                        cell = grid[row_idx][col_idx]
+                        if cell and cell.row == row_idx and cell.col == col_idx:
+                            if cell.text and cell.text.strip():
+                                item_name = cell.text.strip()
+                                break
+                        if item_name:
+                            break
+                
+                # Если item_name не найден, пропускаем строку
+                if not item_name:
+                    continue
+                
+                # Собираем факты как объект (ключ - название колонки, значение - значение ячейки)
+                facts: Dict[str, str] = {}
+                
+                for col_idx in range(docx_table.cols):
+                    if col_idx in column_attribute_columns:
+                        continue
+                    cell = grid[row_idx][col_idx]
+                    if not cell or cell.row != row_idx or cell.col != col_idx:
+                        continue
+                    
+                    cell_text = cell.text.strip() if cell.text else ""
+                    column_name = column_names.get(col_idx, f"Колонка {col_idx + 1}")
+                    
+                    # Добавляем факт в объект
+                    if cell_text:
+                        facts[column_name] = cell_text
+                
+                # Добавляем item только если есть факты
+                if facts:
+                    items.append({
+                        "item_name": item_name,
+                        "row": row_idx + 1,  # row начинается с 1
+                        "facts": facts  # Объект вместо массива
+                    })
+
+            if not table_name:
+                raise TableConversionError("Название таблицы не может быть пустым")
+
+            table_data = {
+                "table_name": table_name,
+                "items": items,
+            }
+            json_str = json.dumps(table_data, ensure_ascii=False, indent=2)
+            return f"```json\n{json_str}\n```"
+        except Exception as e:
+            raise TableConversionError(f"Ошибка конвертации таблицы: {e}") from e
+    
+    def docx_table_to_json(self, docx_table: ParsedDocxTable, table_name: str) -> str:
+        """
+        Конвертация таблицы, извлеченной из DOCX, в JSON структуру фактов
+        Автоматически выбирает формат на основе наличия объединенных ячеек:
+        - Сложный формат (с массивом facts) для таблиц с объединенными ячейками
+        - Упрощенный формат (с объектом facts) для плоских таблиц
+        
+        Args:
+            docx_table: Распарсенная таблица
+            table_name: Название таблицы
+            
+        Returns:
+            JSON строка с описанием таблицы
+            
+        Raises:
+            TableConversionError: Если не удалось конвертировать таблицу
+        """
+        if self.has_merged_cells(docx_table):
+            return self._docx_table_to_complex_json(docx_table, table_name)
+        else:
+            return self.docx_table_to_simple_json(docx_table, table_name)
+    
+    def docx_table_to_chunks(
+        self, 
+        docx_table: ParsedDocxTable, 
+        table_name: str, 
+        max_chunk_size: int = 1000,
+        chunk_overlap_size: int = 0
+    ) -> List[str]:
+        """
+        Конвертация таблицы в список чанков с группировкой по items
+        Автоматически выбирает формат на основе наличия объединенных ячеек:
+        - Сложный формат (с массивом facts) для таблиц с объединенными ячейками
+        - Упрощенный формат (с объектом facts) для плоских таблиц
+        
+        Args:
+            docx_table: Распарсенная таблица
+            table_name: Название таблицы
+            max_chunk_size: Максимальный размер чанка в символах
+            chunk_overlap_size: Размер перекрытия в символах
+            
+        Returns:
+            Список JSON строк с чанками таблицы
+            
+        Raises:
+            TableConversionError: Если не удалось конвертировать таблицу
+        """
+        if self.has_merged_cells(docx_table):
+            return self._docx_table_to_complex_chunks(docx_table, table_name, max_chunk_size, chunk_overlap_size)
+        else:
+            return self._docx_table_to_simple_chunks(docx_table, table_name, max_chunk_size, chunk_overlap_size)
+    
+    def _docx_table_to_complex_chunks(
+        self, 
+        docx_table: ParsedDocxTable, 
+        table_name: str, 
+        max_chunk_size: int = 1000,
+        chunk_overlap_size: int = 0
+    ) -> List[str]:
+        """
+        Конвертация таблицы с объединенными ячейками в список чанков (сложный формат)
+        
+        Args:
+            docx_table: Распарсенная таблица
+            table_name: Название таблицы
+            max_chunk_size: Максимальный размер чанка в символах
+            chunk_overlap_size: Размер перекрытия в символах
+            
+        Returns:
+            Список JSON строк с чанками таблицы в сложном формате
+            
+        Raises:
+            TableConversionError: Если не удалось конвертировать таблицу
+        """
+        import json
+        
+        if not docx_table:
+            raise TableConversionError("Таблица не может быть None")
+        
+        grid = docx_table.grid
+        if not grid:
+            raise TableConversionError("Сетка таблицы пуста")
+
+        try:
+            analysis = self.analyze_docx_table_structure(docx_table)
+            row_attribute_rows = analysis["row_attribute_rows"]
+            column_attribute_columns = analysis["column_attribute_columns"]
+            global_attrs_by_row = analysis["global_attrs_by_row"]
+
+            # Группируем факты по строкам (items) - используем ту же логику, что и в _docx_table_to_complex_json
             items: List[Dict[str, Any]] = []
             
             for row_idx in range(docx_table.rows):
@@ -483,6 +684,129 @@ class TableProcessor:
         except Exception as e:
             raise TableConversionError(f"Ошибка конвертации таблицы: {e}") from e
     
+    def _docx_table_to_simple_chunks(
+        self, 
+        docx_table: ParsedDocxTable, 
+        table_name: str, 
+        max_chunk_size: int = 1000,
+        chunk_overlap_size: int = 0
+    ) -> List[str]:
+        """
+        Конвертация плоской таблицы (без объединенных ячеек) в список чанков (упрощенный формат)
+        
+        Args:
+            docx_table: Распарсенная таблица
+            table_name: Название таблицы
+            max_chunk_size: Максимальный размер чанка в символах
+            chunk_overlap_size: Размер перекрытия в символах
+            
+        Returns:
+            Список JSON строк с чанками таблицы в упрощенном формате
+            
+        Raises:
+            TableConversionError: Если не удалось конвертировать таблицу
+        """
+        import json
+        
+        if not docx_table:
+            raise TableConversionError("Таблица не может быть None")
+        
+        grid = docx_table.grid
+        if not grid:
+            raise TableConversionError("Сетка таблицы пуста")
+
+        try:
+            analysis = self.analyze_docx_table_structure(docx_table)
+            row_attribute_rows = analysis["row_attribute_rows"]
+            column_attribute_columns = analysis["column_attribute_columns"]
+
+            # Определяем названия колонок из заголовков
+            # Для простых таблиц (без объединенных ячеек) просто берем первую строку как заголовки
+            column_names: Dict[int, str] = {}
+            header_row_idx = 0
+            if row_attribute_rows:
+                # Если есть строки-атрибуты, используем первую из них как заголовки
+                header_row_idx = min(row_attribute_rows)
+            
+            for col_idx in range(docx_table.cols):
+                if col_idx in column_attribute_columns:
+                    continue
+                cell = grid[header_row_idx][col_idx]
+                if cell and cell.text and cell.text.strip():
+                    column_names[col_idx] = cell.text.strip()
+                else:
+                    # Если заголовок пустой, используем номер колонки
+                    column_names[col_idx] = f"Колонка {col_idx + 1}"
+
+            # Группируем факты по строкам (items)
+            items: List[Dict[str, Any]] = []
+            
+            for row_idx in range(docx_table.rows):
+                if row_idx in row_attribute_rows:
+                    continue
+                
+                # Определяем item_name из колонки-атрибута строки
+                item_name: Optional[str] = None
+                for col_idx in sorted(column_attribute_columns, reverse=True):
+                    cell = grid[row_idx][col_idx]
+                    if cell and cell.text and cell.text.strip():
+                        item_name = cell.text.strip()
+                        break
+                
+                # Если не нашли в колонках-атрибутах, ищем в первой колонке данных строки
+                if not item_name:
+                    for col_idx in range(docx_table.cols):
+                        if col_idx in column_attribute_columns:
+                            continue
+                        cell = grid[row_idx][col_idx]
+                        if cell and cell.row == row_idx and cell.col == col_idx:
+                            if cell.text and cell.text.strip():
+                                item_name = cell.text.strip()
+                                break
+                        if item_name:
+                            break
+                
+                # Если item_name не найден, пропускаем строку
+                if not item_name:
+                    continue
+                
+                # Собираем факты как объект (ключ - название колонки, значение - значение ячейки)
+                facts: Dict[str, str] = {}
+                
+                for col_idx in range(docx_table.cols):
+                    if col_idx in column_attribute_columns:
+                        continue
+                    cell = grid[row_idx][col_idx]
+                    if not cell or cell.row != row_idx or cell.col != col_idx:
+                        continue
+                    
+                    cell_text = cell.text.strip() if cell.text else ""
+                    column_name = column_names.get(col_idx, f"Колонка {col_idx + 1}")
+                    
+                    # Добавляем факт в объект
+                    if cell_text:
+                        facts[column_name] = cell_text
+                
+                # Добавляем item только если есть факты
+                if facts:
+                    items.append({
+                        "item_name": item_name,
+                        "row": row_idx + 1,  # row начинается с 1
+                        "facts": facts  # Объект вместо массива
+                    })
+
+            if not table_name:
+                raise TableConversionError("Название таблицы не может быть пустым")
+
+            # Нормализуем пробелы в названии таблицы перед чанкованием
+            table_name = self._normalize_whitespace(table_name)
+            
+            # Чанкуем items целиком (используем упрощенную версию чанкования для простого формата)
+            chunks = self._chunk_table_items_simple(items, table_name, max_chunk_size, chunk_overlap_size)
+            return chunks
+        except Exception as e:
+            raise TableConversionError(f"Ошибка конвертации таблицы: {e}") from e
+    
     def _chunk_table_items(
         self, 
         items: List[Dict[str, Any]], 
@@ -491,15 +815,15 @@ class TableProcessor:
         chunk_overlap_size: int = 200
     ) -> List[str]:
         """
-        Разбивает items таблицы на чанки с учетом максимального размера и перекрытия
+        Разбивает items таблицы на чанки с учетом максимального размера
         В чанк попадает целое число элементов items или целое число facts внутри item.
-        При разбиении больших items используется перекрытие по facts.
+        При разбиении больших items перекрытие не используется.
         
         Args:
             items: Список items таблицы (в формате table2.json)
             table_name: Название таблицы
             max_chunk_size: Максимальный размер чанка в символах
-            chunk_overlap_size: Размер перекрытия в символах (используется для вычисления количества facts для перекрытия)
+            chunk_overlap_size: Размер перекрытия в символах (не используется, оставлен для совместимости)
             
         Returns:
             Список JSON строк с чанками в формате table2.json
@@ -542,7 +866,7 @@ class TableProcessor:
             item_json = json.dumps(item, ensure_ascii=False)
             item_size = len(item_json) + 2  # +2 для запятой и переноса строки
             
-            # Если размер одного item превышает max_chunk_size, разбиваем его на части с перекрытием
+            # Если размер одного item превышает max_chunk_size, разбиваем его на части без перекрытия
             if item_size + table_name_overhead > max_chunk_size:
                 # Сохраняем текущий чанк, если есть items
                 if current_chunk_items:
@@ -558,9 +882,9 @@ class TableProcessor:
                     current_chunk_items = []
                     current_size = 0
                 
-                # Разбиваем большой item на части с перекрытием по facts
-                item_parts = self._split_item_with_overlap(
-                    item_name, row, facts, table_name, max_chunk_size, chunk_overlap_size
+                # Разбиваем большой item на части без перекрытия по facts
+                item_parts = self._split_item(
+                    item_name, row, facts, table_name, max_chunk_size
                 )
                 chunks.extend(item_parts)
                 continue
@@ -597,6 +921,133 @@ class TableProcessor:
         
         return chunks
     
+    def _chunk_table_items_simple(
+        self, 
+        items: List[Dict[str, Any]], 
+        table_name: str, 
+        max_chunk_size: int,
+        chunk_overlap_size: int = 200
+    ) -> List[str]:
+        """
+        Разбивает items таблицы на чанки с учетом максимального размера (упрощенный формат)
+        В чанк попадает целое число элементов items. Для простого формата facts - это объект,
+        поэтому разбиение по facts внутри item не выполняется.
+        
+        Args:
+            items: Список items таблицы (в упрощенном формате с объектом facts)
+            table_name: Название таблицы
+            max_chunk_size: Максимальный размер чанка в символах
+            chunk_overlap_size: Размер перекрытия в символах (не используется для простого формата)
+            
+        Returns:
+            Список JSON строк с чанками в упрощенном формате
+        """
+        import json
+        
+        if not items:
+            # Если items нет, возвращаем один чанк с пустым списком
+            table_data = {
+                "table_name": table_name,
+                "items": [],
+            }
+            json_str = json.dumps(table_data, ensure_ascii=False)
+            chunk_content = f"```json\n{json_str}\n```"
+            # Нормализуем пробелы сразу после создания JSON
+            chunk_content = self._normalize_whitespace(chunk_content)
+            return [chunk_content]
+        
+        chunks: List[str] = []
+        current_chunk_items: List[Dict[str, Any]] = []
+        current_size = 0
+        
+        # Размер названия таблицы (включая структуру JSON)
+        table_name_overhead = len(f'{{"table_name": "{table_name}", "items": []}}')
+        
+        for item in items:
+            # Нормализуем пробелы в item_name и facts перед обработкой
+            item_name = self._normalize_whitespace(item.get("item_name", ""))
+            row = item.get("row", 0)
+            facts = item.get("facts", {})
+            
+            # Нормализуем пробелы в facts (объект)
+            normalized_facts = {}
+            for key, value in facts.items():
+                normalized_key = self._normalize_whitespace(str(key))
+                normalized_value = self._normalize_whitespace(str(value))
+                normalized_facts[normalized_key] = normalized_value
+            
+            # Создаем нормализованный item
+            normalized_item = {
+                "item_name": item_name,
+                "row": row,
+                "facts": normalized_facts
+            }
+            
+            # Оцениваем размер item в JSON
+            item_json = json.dumps(normalized_item, ensure_ascii=False)
+            item_size = len(item_json) + 2  # +2 для запятой и переноса строки
+            
+            # Если размер одного item превышает max_chunk_size, добавляем его отдельно
+            # (для простого формата не разбиваем item на части)
+            if item_size + table_name_overhead > max_chunk_size:
+                # Сохраняем текущий чанк, если есть items
+                if current_chunk_items:
+                    table_data = {
+                        "table_name": table_name,
+                        "items": current_chunk_items,
+                    }
+                    json_str = json.dumps(table_data, ensure_ascii=False)
+                    chunk_content = f"```json\n{json_str}\n```"
+                    # Нормализуем пробелы сразу после создания JSON
+                    chunk_content = self._normalize_whitespace(chunk_content)
+                    chunks.append(chunk_content)
+                    current_chunk_items = []
+                    current_size = 0
+                
+                # Добавляем большой item отдельным чанком
+                table_data = {
+                    "table_name": table_name,
+                    "items": [normalized_item],
+                }
+                json_str = json.dumps(table_data, ensure_ascii=False)
+                chunk_content = f"```json\n{json_str}\n```"
+                # Нормализуем пробелы сразу после создания JSON
+                chunk_content = self._normalize_whitespace(chunk_content)
+                chunks.append(chunk_content)
+                continue
+            
+            # Если добавление item превысит лимит, сохраняем текущий чанк
+            if current_chunk_items and current_size + item_size + table_name_overhead > max_chunk_size:
+                table_data = {
+                    "table_name": table_name,
+                    "items": current_chunk_items,
+                }
+                json_str = json.dumps(table_data, ensure_ascii=False)
+                chunk_content = f"```json\n{json_str}\n```"
+                # Нормализуем пробелы сразу после создания JSON
+                chunk_content = self._normalize_whitespace(chunk_content)
+                chunks.append(chunk_content)
+                current_chunk_items = []
+                current_size = 0
+            
+            # Добавляем item в текущий чанк
+            current_chunk_items.append(normalized_item)
+            current_size += item_size
+        
+        # Добавляем последний чанк, если есть items
+        if current_chunk_items:
+            table_data = {
+                "table_name": table_name,
+                "items": current_chunk_items,
+            }
+            json_str = json.dumps(table_data, ensure_ascii=False)
+            chunk_content = f"```json\n{json_str}\n```"
+            # Нормализуем пробелы сразу после создания JSON
+            chunk_content = self._normalize_whitespace(chunk_content)
+            chunks.append(chunk_content)
+        
+        return chunks
+    
     def _normalize_whitespace(self, text: str) -> str:
         """
         Заменяет последовательности из более чем одного пробельного символа на один пробел.
@@ -611,17 +1062,16 @@ class TableProcessor:
         from .utils import normalize_whitespace
         return normalize_whitespace(text)
     
-    def _split_item_with_overlap(
+    def _split_item(
         self,
         item_name: str,
         row: int,
         facts: List[Dict[str, Any]],
         table_name: str,
-        max_chunk_size: int,
-        chunk_overlap_size: int
+        max_chunk_size: int
     ) -> List[str]:
         """
-        Разбивает большой item на части с перекрытием по facts.
+        Разбивает большой item на части без перекрытия по facts.
         Каждая часть содержит целое число facts и имеет правильную JSON-структуру.
         
         Args:
@@ -630,7 +1080,6 @@ class TableProcessor:
             facts: Список facts для item
             table_name: Название таблицы
             max_chunk_size: Максимальный размер чанка
-            chunk_overlap_size: Размер перекрытия в символах
             
         Returns:
             Список JSON строк с частями item
@@ -664,16 +1113,6 @@ class TableProcessor:
             "facts": []
         }
         base_item_size = len(json.dumps(base_item_structure, ensure_ascii=False))
-        
-        # Вычисляем размер одного fact для оценки перекрытия
-        if facts:
-            sample_fact_json = json.dumps(facts[0], ensure_ascii=False)
-            avg_fact_size = len(sample_fact_json)
-        else:
-            avg_fact_size = 100  # Примерная оценка
-        
-        # Вычисляем количество facts для перекрытия (примерно)
-        overlap_facts_count = max(1, int(chunk_overlap_size / avg_fact_size) if avg_fact_size > 0 else 1)
         
         start_idx = 0
         
@@ -749,14 +1188,11 @@ class TableProcessor:
             
             chunks.append(chunk_content)
             
-            # Переходим к следующей части с перекрытием
+            # Переходим к следующей части без перекрытия
             if end_idx >= len(facts):
                 break
             
-            # Вычисляем начало следующей части с учетом перекрытия
-            # Перекрытие должно быть целым числом facts
-            overlap_count = min(overlap_facts_count, len(current_facts))
-            start_idx = end_idx - overlap_count
+            start_idx = end_idx
         
         return chunks
 
